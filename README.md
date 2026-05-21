@@ -41,7 +41,7 @@ host process to root, enables the debug menu, and loads
 This payload runs **inside** the Y2JB userland framework on the PS5
 (the YouTube TV app modded to run arbitrary JavaScript). Before you
 can send anything to the console, you must restore Gezine's Y2JB
-savedata backup on the PS5 — see [Gezine/Y2JB](https://github.com/Gezine/Y2JB)
+system backup on the PS5 — see [Gezine/Y2JB](https://github.com/Gezine/Y2JB)
 for the backup file and the restore procedure. Without Y2JB
 restored and the YouTube TV app launched, the PS5 has no listener
 for the payload and nothing will happen.
