@@ -62,8 +62,10 @@ for the payload and nothing will happen.
 ### Files
 
 - `p2jb.js` — the jailbreak payload (this repo).
-- `elfldr_1320.elf` — included in this repo for convenience. Binary by
-  Gezine.
+- `elfldr_1320.elf` — ELF loader for **firmware ≥ 11.00**. Binary by Gezine.
+- `elfldr.elf` — ELF loader for **firmware < 11.00**. Use this one on
+  older FWs (it's the legacy binary that predates the `_1320` build).
+  Both files are bundled here for convenience.
 
 ---
 
@@ -71,8 +73,14 @@ for the payload and nothing will happen.
 
 ### 1. Prepare the USB drive
 
-Copy `elfldr_1320.elf` to the root of your USB drive, exactly as
-`/elfldr_1320.elf`. Plug it into the PS5 before launching the payload.
+Pick the right loader for your firmware and copy it to the **root** of
+your USB drive (FAT32 or exFAT):
+
+- **Firmware ≥ 11.00** → copy `elfldr_1320.elf` as `/elfldr_1320.elf`
+- **Firmware < 11.00**  → copy `elfldr.elf` as `/elfldr.elf`
+
+Then plug the USB into the PS5 before launching the payload. The
+payload scans `/mnt/usb0`..`/mnt/usb7` and accepts either filename.
 
 ### 2. Launch the YouTube app on the PS5 and wait
 
