@@ -95,7 +95,7 @@ python payload_sender.py <ps5-ip> p2jb.js
 
 The payload streams its log back to `payload_sender.py`'s console.
 
-### 4. Watch for the pre-flight gate
+### 4. Watch the pipe fds
 
 Early in the run, you will see a log line like:
 
@@ -103,10 +103,12 @@ Early in the run, you will see a log line like:
 [p2jb] pipes master=X,Y victim=Z,W
 ```
 
-If `master ≤ 34`, the run proceeds. Otherwise the payload aborts with a
-`FATAL: pipe shift detected` message **without** touching the kernel,
-so no console reboot or storage repair is needed. Close YouTube
-(Options → Close application), reopen it, wait longer than before, and
+The first number (`master`) is a fingerprint of how busy YouTube is at
+that moment: lower means the app has fewer fds open and the host is
+quieter. **The rest of the run is much more likely to complete when
+`master` is 34 or less**; higher values empirically correlate with
+kernel panics later on. If `master` is above 34, close YouTube
+(Options → Close application), reopen it, wait longer this time, and
 retry from step 2.
 
 ### 5. Wait ~2 hours
@@ -154,9 +156,11 @@ and refer to BD-UN-JB's own documentation for the rest.
   cleanup is not yet bulletproof. **Mitigation:** apply a persistent
   jailbreak (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before
   closing — its effect survives the panic-on-close.
-- **`master_rfd > 34` aborts the run.** Restart YouTube and retry. This
-  is intentional: a noisier host correlates with kernel-panics at the
-  stage 0 → stage 1 transition.
+- **Host noise matters.** The first `master` pipe fd printed in the log
+  is a proxy for how busy YouTube is. A `master` value **≤ 34** makes
+  the rest of the run substantially more likely to complete; higher
+  values correlate with kernel panics at the stage 0 → stage 1
+  transition. Restart YouTube and wait longer to lower it.
 - **One run per boot.** A `p2jb.fail` marker is dropped at stage 0 entry
   to refuse re-runs without a reboot — the triple-free is a point of
   no return.
