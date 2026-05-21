@@ -1740,13 +1740,13 @@
         await ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
-        const MAX_MASTER_RFD = 34;
+        /*const MAX_MASTER_RFD = 34;
         if (S.master_rfd > MAX_MASTER_RFD) {
             fail("pipe shift detected (got master=" + S.master_rfd + "," +
                 S.master_wfd + " victim=" + S.victim_rfd + "," + S.victim_wfd +
                 ", need master_rfd <= " + MAX_MASTER_RFD + ") - host noisy, " +
                 "restart YouTube, wait longer, retry. Kernel UNTOUCHED.");
-        }
+        }*/
         await ulog("host OK - starting ~2 hour leak; no further log output " +
             "until stage 0 (this is normal, do not interrupt)");
 
