@@ -1,0 +1,8 @@
+# Python build script artefacts
+__pycache__/
+*.pyc
+
+# Editor scratch
+.vscode/
+.idea/
+*.swp
