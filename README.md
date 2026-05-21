@@ -76,11 +76,13 @@ Copy `elfldr_1320.elf` to the root of your USB drive, exactly as
 
 ### 2. Launch the YouTube app on the PS5 and wait
 
-Wait **at least 60 seconds** after the YouTube UI is fully loaded before
-sending the payload — preferably more. This payload reads kernel fd
-numbers as a host-noise signal and aborts cleanly if the YouTube host is
-still busy with startup work. Waiting longer = quieter host = a higher
-chance of passing the pre-flight gate.
+When the YouTube UI loads, **dismiss any popups / prompts** that appear
+(sign-in invites, banners, cookies, etc.). Then **wait at least 60
+seconds** before sending the payload — preferably more. This payload
+reads kernel fd numbers as a host-noise signal and aborts cleanly if
+the YouTube host is still busy with startup work or with a popup
+keeping the UI active. Waiting longer = quieter host = a higher chance
+of passing the pre-flight gate.
 
 ### 3. Send the payload
 
