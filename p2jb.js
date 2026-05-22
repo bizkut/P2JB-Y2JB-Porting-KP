@@ -1826,9 +1826,12 @@
 
                     if (d.pipe_addr !== undefined && d.pipe_addr !== 0n && (d.pipe_addr >> 48n) === 0xFFFFn) {
                         try {
-                            S.kwrite64(d.pipe_addr + 0x00n, 0n);
-                            S.kwrite64(d.pipe_addr + 0x08n, 0n);
-                            S.kwrite64(d.pipe_addr + 0x10n, 0n);
+                            // Zero entire pipe_buffer structure to prevent panic in pipe_free()
+                            // Offsets: cnt=0x00, in=0x04, out=0x08, size=0x0C, buffer ptr=0x10-0x18
+                            S.kwrite64(d.pipe_addr + 0x00n, 0n);  // cnt + in (32-bit each)
+                            S.kwrite64(d.pipe_addr + 0x08n, 0n);  // out + size (32-bit each)
+                            S.kwrite64(d.pipe_addr + 0x10n, 0n);  // buffer ptr (lower 64-bits)
+                            S.kwrite64(d.pipe_addr + 0x18n, 0n);  // buffer ptr extension / flags
                         } catch (_) { }
                     }
 
