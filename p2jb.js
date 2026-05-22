@@ -1378,6 +1378,10 @@
             syscall(SYSCALL.close, BigInt(S.uio_sock_a));
             syscall(SYSCALL.close, BigInt(S.uio_sock_b));
 
+            for (const w of S.iov_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
+            for (const w of S.uio_read_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
+            for (const w of S.uio_write_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
+
             S.iov_ws.signal();
             S.uio_read_ws.signal();
             S.uio_write_ws.signal();
