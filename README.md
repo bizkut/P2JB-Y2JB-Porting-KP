@@ -138,11 +138,6 @@ and refer to BD-UN-JB's own documentation for the rest.
   cleanup is not yet bulletproof. **Mitigation:** apply a persistent
   jailbreak (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before
   closing — its effect survives the panic-on-close.
-- **Host noise matters.** The first `master` pipe fd printed in the log
-  is a proxy for how busy YouTube is. A `master` value **≤ 34** makes
-  the rest of the run substantially more likely to complete; higher
-  values correlate with kernel panics at the stage 0 → stage 1
-  transition. Restart YouTube and wait longer to lower it.
 - **One run per boot.** A `p2jb.fail` marker is dropped at stage 0 entry
   to refuse re-runs without a reboot — the triple-free is a point of
   no return.
