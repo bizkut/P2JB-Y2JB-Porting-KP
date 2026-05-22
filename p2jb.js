@@ -1857,13 +1857,16 @@
                 if (S.orig_fd_jdir !== 0n && (S.orig_fd_jdir >> 48n) === 0xFFFFn) {
                     S.kwrite64(S.proc_fd + S.OFF.FD_JDIR, S.orig_fd_jdir);
                 }
-                // Restore ucred fields (keep authid/caps for elfldr functionality)
+                // Restore ucred fields (including authid/caps for consistent credentials on exit)
                 S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_UID, S.orig_ucred.uid);
                 S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RUID, S.orig_ucred.ruid);
                 S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_SVUID, S.orig_ucred.svuid);
                 S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RGID, S.orig_ucred.rgid);
                 S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_NGROUPS, S.orig_ucred.ngroups);
                 S.kwrite64(S.proc_ucred + 0x80n, S.orig_ucred.attrs);
+                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, S.orig_ucred.authid);
+                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
+                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
                 await ulog("cleanup: kernel state restored");
             } catch (e) {
                 await ulog("cleanup: failed: " + e.message);
