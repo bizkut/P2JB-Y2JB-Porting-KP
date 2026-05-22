@@ -9,13 +9,14 @@ overflow via `kqueueex`) from the luac0re (lua-loader) host to
 Confirmed working: jailbreak end-to-end + debug menu + USB-loaded
 `elfldr_1320` + persistent unpatcher delivery.
 
-> ⚠️ **Status — work in progress.** The in-memory jailbreak completes
-> reliably, but **closing the YouTube host app after `=== p2jb complete ===`
-> currently kernel-panics the console**. The
-> [post-jailbreak stability work](#known-limitations) is ongoing.
-> In practice this is not a blocker if you apply
-> [BD-UN-JB](https://github.com/Gezine/BD-UN-JB) right after the
-> jailbreak completes.
+> **Status:** The in-memory jailbreak completes reliably. The
+> post-jailbreak cleanup now neutralizes the known panic-on-close
+> hazards: corrupted `ipv6_kernel_rw` socket `pktinfo` pointers,
+> forged pipe-buffer state, and restored process credentials/root
+> directory on both the normal completion path and late-failure path.
+> Treat close stability as **improved but hardware-test pending** and
+> apply [BD-UN-JB](https://github.com/Gezine/BD-UN-JB) as usual after
+> the jailbreak completes.
 
 > **Firmware support:** confirmed on **11.60**. The bundled offsets
 > table covers firmwares **9.00 – 12.40** (luac0re-sourced values),
@@ -27,7 +28,7 @@ Confirmed working: jailbreak end-to-end + debug menu + USB-loaded
 ## How it works
 
 The payload triggers a 32-bit `cr_ref` overflow in the PS5 kernel
-(via ~2³² `kqueueex` syscalls, ~2 hours), uses the resulting
+(via ~2³² `kqueueex` syscalls, ~50 minutes), uses the resulting
 use-after-free to build a kernel read/write primitive, escalates the
 host process to root, enables the debug menu, and loads
 `elfldr_1320` from USB — exposing a remote ELF loader on TCP `:9021`.
@@ -116,13 +117,13 @@ so no console reboot or storage repair is needed. Close YouTube
 (Options → Close application), reopen it, wait longer than before, and
 retry from step 2.
 
-### 5. Wait ~2 hours
+### 5. Wait ~50 minutes
 
-The cr_ref leak dominates the runtime. The payload sender will stay
-silent for the whole leak — no per-percentage progress is printed.
-Don't assume it has crashed; the worker is internally checked for
-liveness and a stall would surface as a `FATAL` log line. Do not
-interact with the PS5 while it runs.
+The cr_ref leak dominates the runtime. The payload may print coarse
+burn progress milestones, but long quiet stretches are normal. Don't
+assume it has crashed; the worker is internally checked for liveness
+and a stall would surface as a `FATAL` log line. Do not interact with
+the PS5 while it runs.
 
 ### 6. Look for completion
 
@@ -155,12 +156,14 @@ and refer to BD-UN-JB's own documentation for the rest.
 
 ## Known limitations
 
-- ⚠️ **Closing the YouTube host app kernel-panics the console (WIP).**
-  After `=== p2jb complete ===`, exiting YouTube from the PS5 menu
-  triggers an improper shutdown. The post-jailbreak kernel-state
-  cleanup is not yet bulletproof. **Mitigation:** apply a persistent
-  jailbreak (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before
-  closing — its effect survives the panic-on-close.
+- **Post-jailbreak close stability is improved, hardware-test pending.**
+  The known panic-on-close hazards are now cleaned up before return:
+  `ipv6_kernel_rw` socket `pktinfo` pointers are zeroed, the full forged
+  pipe state is neutralized, and process credentials/root directories
+  are restored. The same cleanup is attempted after late failures once
+  kernel R/W has been achieved. Keep applying a persistent jailbreak
+  (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before closing
+  until this has been verified on hardware.
 - **`master_rfd > 34` aborts the run.** Restart YouTube and retry. This
   is intentional: a noisier host correlates with kernel-panics at the
   stage 0 → stage 1 transition.

