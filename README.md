@@ -95,14 +95,6 @@ python payload_sender.py <ps5-ip> p2jb.js
 
 The payload streams its log back to `payload_sender.py`'s console.
 
-### 4. Watch the pipe fds
-
-Early in the run, you will see a log line like:
-
-```
-[p2jb] pipes master=X,Y victim=Z,W
-```
-
 The first number (`master`) is a fingerprint of how busy YouTube is at
 that moment: lower means the app has fewer fds open and the host is
 quieter. **The rest of the run is much more likely to complete when
@@ -111,7 +103,7 @@ kernel panics later on. If `master` is above 34, close YouTube
 (Options → Close application), reopen it, wait longer this time, and
 retry from step 2.
 
-### 5. Wait ~50 minutes
+### 4. Wait ~50 minutes
 
 The cr_ref leak dominates the runtime. The payload sender will stay
 silent for the whole leak — no per-percentage progress is printed.
@@ -119,7 +111,7 @@ Don't assume it has crashed; the worker is internally checked for
 liveness and a stall would surface as a `FATAL` log line. Do not
 interact with the PS5 while it runs.
 
-### 6. Look for completion
+### 5. Look for completion
 
 ```
 [p2jb] stage_elfldr: daemon should be listening on :9021
