@@ -2042,8 +2042,6 @@
             await stage7(S);
             await stage_load_elf(S);
 
-            // Cleanup kernel state before marking complete (prevents panic on YouTube close)
-            await cleanup_kernel_state(S);
             cleanup_done = true;
 
         } catch (e) {
