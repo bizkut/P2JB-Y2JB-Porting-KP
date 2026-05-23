@@ -6,8 +6,13 @@
 overflow via `kqueueex`) from the luac0re (lua-loader) host to
 [Y2JB](https://github.com/Gezine/Y2JB) (YouTube / V8 JavaScript host).
 
-Confirmed working: jailbreak end-to-end + debug menu + USB-loaded
-`elfldr_1320` + persistent unpatcher delivery.
+Confirmed working: jailbreak end-to-end + debug menu + ELF loader
+(`elfldr_1320`, via Y2JB 1.4 `kexp` shellcode or USB fallback) +
+persistent unpatcher delivery.
+
+**Compatible with both Y2JB 1.3 and Y2JB 1.4.** The payload
+automatically detects the framework version and uses the appropriate
+ELF-loader delivery method (kexp handoff on 1.4+, USB fallback on 1.3).
 
 > **Status:** The in-memory jailbreak completes reliably. The
 > post-jailbreak cleanup now neutralizes the known panic-on-close
@@ -30,8 +35,12 @@ Confirmed working: jailbreak end-to-end + debug menu + USB-loaded
 The payload triggers a 32-bit `cr_ref` overflow in the PS5 kernel
 (via ~2³² `kqueueex` syscalls, ~50 minutes), uses the resulting
 use-after-free to build a kernel read/write primitive, escalates the
-host process to root, enables the debug menu, and loads
-`elfldr_1320` from USB — exposing a remote ELF loader on TCP `:9021`.
+host process to root, enables the debug menu, and then loads
+`elfldr_1320` — exposing a remote ELF loader on TCP `:9021`.
+
+On **Y2JB 1.4+** this uses the built-in `kexp` shellcode handoff
+(no USB required). On **Y2JB 1.3** it falls back to loading the ELF
+binary from a USB drive.
 
 ---
 
@@ -47,11 +56,19 @@ for the backup file and the restore procedure. Without Y2JB
 restored and the YouTube TV app launched, the PS5 has no listener
 for the payload and nothing will happen.
 
+**Y2JB 1.4 or newer is recommended.** The ELF-loader stage prefers
+the built-in `kexp` shellcode handoff (no USB needed). If you are on
+an older Y2JB the payload automatically falls back to loading the ELF
+binary from a USB drive.
+
 ### Hardware
 
 - PlayStation 5 console running firmware **9.00 – 12.40** (tested on 11.60).
-- A USB flash drive formatted FAT32 or exFAT.
 - A PC on the same LAN as the PS5.
+
+A USB drive is only needed when running on an older Y2JB version
+(< 1.4). On Y2JB 1.4+ the built-in `kexp` shellcode loads
+`elfldr_1320` from the framework's own files on the console.
 
 ### Software (on PC)
 
@@ -72,10 +89,13 @@ for the payload and nothing will happen.
 
 ## Usage
 
-### 1. Prepare the USB drive
+### 1. Prepare the USB drive (only if on Y2JB < 1.4)
 
-Pick the right loader for your firmware and copy it to the **root** of
-your USB drive (FAT32 or exFAT):
+If your PS5 is running Y2JB 1.4 or newer, skip this step — the
+payload will automatically use the built-in `kexp` shellcode.
+
+On an older Y2JB version, pick the right loader for your firmware and
+copy it to the **root** of your USB drive (FAT32 or exFAT):
 
 - **Firmware ≥ 11.00** → copy `elfldr_1320.elf` as `/elfldr_1320.elf`
 - **Firmware < 11.00**  → copy `elfldr.elf` as `/elfldr.elf`
@@ -195,7 +215,9 @@ along the way.
   [Luac0re](https://github.com/Gezine/Luac0re).
 - **Y2JB userland framework** — Gezine.
   [Y2JB](https://github.com/Gezine/Y2JB).
-- **`elfldr_1320`** — Gezine (ELF loader binary).
+- **`elfldr_1320`** — ELF loader binary by Gezine, shipped inside Y2JB.
+- **`kexp` post-jailbreak all-in-one shellcode** — ufm42
+  ([kexp](https://github.com/ufm42/kexp)), merged into Y2JB 1.4.
 - **`notmaj0r` remote_lua_loader p2jb port** — used as a secondary
   reference during the port.
 - **`BD-UN-JB` persistent unpatcher** — Gezine.
