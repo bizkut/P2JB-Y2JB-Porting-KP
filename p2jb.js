@@ -1383,16 +1383,17 @@
                 const rc = S.kread32(fp + 0x28n);
                 if (rc > 0n && rc < 0x10000n) S.kwrite32(fp + 0x28n, Number(rc) + delta);
             };
-            const null_rthdr = fd => {
+            const null_inpcb_pktopts = fd => {
                 const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
                 const f_data = S.kread64(fp);
                 if (f_data === 0n || (f_data >> 48n) !== 0xFFFFn) return;
                 const so_pcb = S.kread64(f_data + 0x18n);
                 if (so_pcb === 0n || (so_pcb >> 48n) !== 0xFFFFn) return;
-                const pktopts = S.kread64(so_pcb + S.OFF.INPCB_PKTOPTS);
-                if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
-                S.kwrite64(pktopts + S.OFF.IP6PO_RTHDR, 0n);
+                // Zero the inpcb pktopts pointer so ip6_freepktopts() is never called
+                // on close. The pktopns may have been reclaimed by a kqueue; freeing it
+                // as M_IP6OPT causes a zone-mismatch panic.
+                S.kwrite64(so_pcb + S.OFF.INPCB_PKTOPTS, 0n);
             };
 
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
@@ -1400,7 +1401,7 @@
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) fail("stage3b: bad fp " + fd);
                 bump(fp, 0x100);
             }
-            for (const fd of S.ipv6_sockets) null_rthdr(fd);
+            for (const fd of S.ipv6_sockets) null_inpcb_pktopts(fd);
 
             for (let i = S.free_fd_idx; i < S.free_fds.length; i++) {
                 syscall(SYSCALL.close, BigInt(S.free_fds[i]));
