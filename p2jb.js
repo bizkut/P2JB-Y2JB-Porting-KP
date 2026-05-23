@@ -1829,7 +1829,49 @@
                 return;
             }
             try {
-                // ----- Primary: Y2JB 1.4+ kexp handoff -----
+                // ----- Primary: USB ELF loader (preferred if present) -----
+                let elf_path = null;
+                const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
+                for (let u = 0; u < 8 && !elf_path; u++) {
+                    for (const name of usb_names) {
+                        const p = "/mnt/usb" + u + "/" + name;
+                        if (file_exists(p)) { elf_path = p; break; }
+                    }
+                }
+
+                if (elf_path &&
+                    typeof elf_parse === "function" &&
+                    typeof elf_run === "function" &&
+                    typeof elf_wait_for_exit === "function" &&
+                    typeof ipv6_kernel_rw !== "undefined") {
+                    await ulog("stage_elfldr: USB elfldr found at " + elf_path +
+                        " - using USB path (priority over kexp)");
+
+                    ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
+                    kernel.addr.data_base = S.data_base;
+                    await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
+                        ipv6_kernel_rw.data.master_sock + " victim_sock=" +
+                        ipv6_kernel_rw.data.victim_sock + ")");
+
+                    const elf_data = read_file(elf_path);
+                    await ulog("stage_elfldr: read " + elf_data.length +
+                        " bytes; parsing...");
+                    const entry = await elf_parse(elf_data);
+                    await ulog("stage_elfldr: elf entry=" + toHex(entry) +
+                        "; spawning elfldr...");
+                    const { thr_handle, payloadout } = await elf_run(entry, elf_path);
+
+                    await ulog("stage_elfldr: elfldr spawned - joining...");
+                    await elf_wait_for_exit(thr_handle, payloadout);
+                    const out = read32(payloadout);
+                    await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
+                    await ulog("stage_elfldr: daemon should be listening on :9021");
+                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
+                    return;
+                }
+
+                // ----- Fallback: Y2JB 1.4+ kexp handoff -----
                 if (typeof load_aioshellcode === "function") {
                     await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
 
@@ -1874,54 +1916,8 @@
                     return;
                 }
 
-                // ----- Fallback: legacy USB ELF loader (Y2JB < 1.4) -----
-                if (typeof elf_parse !== "function" || typeof elf_run !== "function" ||
-                    typeof elf_wait_for_exit !== "function" ||
-                    typeof ipv6_kernel_rw === "undefined") {
-                    await ulog("stage_elfldr: framework elf_parse/elf_run/" +
-                        "elf_wait_for_exit/ipv6_kernel_rw not in scope - skipped");
-                    send_notification("Stage 7\nelf loader unavailable - skipped");
-                    return;
-                }
-
-                await ulog("stage_elfldr: scanning /mnt/usb0..7 for elfldr...");
-                const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
-                let elf_path = null;
-                for (let u = 0; u < 8 && !elf_path; u++) {
-                    for (const name of usb_names) {
-                        const p = "/mnt/usb" + u + "/" + name;
-                        if (file_exists(p)) { elf_path = p; break; }
-                    }
-                }
-                if (!elf_path) {
-                    await ulog("stage_elfldr: elfldr not found on /mnt/usb0../usb7");
-                    send_notification("Stage 7\nelfldr_1320.elf NOT FOUND on USB\n" +
-                        "(plug a FAT32/exFAT USB with elfldr_1320.elf)");
-                    return;
-                }
-                await ulog("stage_elfldr: found " + elf_path);
-
-                ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
-                kernel.addr.data_base = S.data_base;
-                await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
-                    ipv6_kernel_rw.data.master_sock + " victim_sock=" +
-                    ipv6_kernel_rw.data.victim_sock + ")");
-
-                const elf_data = read_file(elf_path);
-                await ulog("stage_elfldr: read " + elf_data.length +
-                    " bytes; parsing...");
-                const entry = await elf_parse(elf_data);
-                await ulog("stage_elfldr: elf entry=" + toHex(entry) +
-                    "; spawning elfldr...");
-                const { thr_handle, payloadout } = await elf_run(entry, elf_path);
-
-                await ulog("stage_elfldr: elfldr spawned - joining...");
-                await elf_wait_for_exit(thr_handle, payloadout);
-                const out = read32(payloadout);
-                await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                await ulog("stage_elfldr: daemon should be listening on :9021");
-                send_notification("Stage 7\nelfldr running - send your ELF to\n" +
-                    "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
+                await ulog("stage_elfldr: no elfldr path available (USB not found, kexp unsupported)");
+                send_notification("Stage 7\nelfldr unavailable - skipped");
             } catch (e) {
                 await ulog("stage_elfldr: failed: " + e.message);
                 send_notification("Stage 7\nelfldr failed: " + e.message +
