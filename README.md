@@ -15,7 +15,12 @@ automatically detects the framework version and uses the appropriate
 ELF-loader delivery method (kexp handoff on 1.4+, USB fallback on 1.3).
 
 > **Status:** The in-memory jailbreak completes reliably. The
-> post-jailbreak cleanup now neutralizes the known panic-on-close
+> `elfldr` ELF loader is intentionally spawned as a **daemon thread
+> inside the YouTube process** (this is how both the legacy USB path
+> and the Y2JB 1.4 `kexp` shellcode launch it). Because of this,
+> **closing YouTube also terminates `elfldr`.**
+>
+> The post-jailbreak cleanup neutralizes the known panic-on-close
 > hazards: corrupted `ipv6_kernel_rw` socket `pktinfo` pointers,
 > forged pipe-buffer state, and restored process credentials/root
 > directory on both the normal completion path and late-failure path.
@@ -155,9 +160,11 @@ the PS5 while it runs.
 At this point you have an in-memory jailbreak and a generic ELF loader.
 Any ELF you send to `:9021` will run on the jailbroken PS5.
 
-> ⚠️ Do **not** close the YouTube app or let the console go idle for
-> too long without doing something — see
-> [Known limitations](#known-limitations).
+> ⚠️ Do **not** close the YouTube app.** `elfldr` is a daemon thread
+> inside YouTube; closing the app kills the loader and may kernel-panic
+> the console due to corrupted kernel state left by the jailbreak.
+> Apply a persistent payload (e.g. BD-UN-JB) while YouTube is still
+> open — see [Known limitations](#known-limitations).
 
 ### Sending an ELF to `:9021`
 
@@ -176,22 +183,26 @@ and refer to BD-UN-JB's own documentation for the rest.
 
 ## Known limitations
 
-- **Post-jailbreak close stability is improved, hardware-test pending.**
-  The known panic-on-close hazards are now cleaned up before return:
-  `ipv6_kernel_rw` socket `pktinfo` pointers are zeroed, the full forged
-  pipe state is neutralized, and process credentials/root directories
-  are restored. The same cleanup is attempted after late failures once
-  kernel R/W has been achieved. Keep applying a persistent jailbreak
-  (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before closing
-  until this has been verified on hardware.
+- **Closing YouTube may kernel-panic the console.** The panic is caused
+  by corrupted kernel state left behind from the jailbreak (forged pipe
+  buffers, dangling socket `pktinfo` pointers, altered credentials), not
+  by `elfldr` itself. Cleanup code attempts to restore the original
+  state on both the success path and the late-failure path, but this
+  has not been fully verified on hardware. **Keep applying a persistent
+  jailbreak** (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB))
+  before closing YouTube until the cleanup is confirmed stable.
 - **`master_rfd > 34` aborts the run.** Restart YouTube and retry. This
   is intentional: a noisier host correlates with kernel-panics at the
   stage 0 → stage 1 transition.
 - **One run per boot.** A `p2jb.fail` marker is dropped at stage 0 entry
   to refuse re-runs without a reboot — the triple-free is a point of
   no return.
-- **YouTube app must stay open** until your persistent payload (if any)
-  has applied. `elfldr` is a daemon thread inside the YouTube process.
+- **`elfldr` is a daemon thread inside the YouTube process.** Whether it
+  is launched via the Y2JB 1.4 `kexp` shellcode or the legacy USB path,
+  it lives inside the YouTube process. Closing the YouTube app kills
+  `elfldr` and — because of the corrupted kernel state noted above —
+  may also trigger a kernel panic. Apply your persistent payload
+  (e.g. BD-UN-JB) while YouTube is still open.
 
 ---
 
