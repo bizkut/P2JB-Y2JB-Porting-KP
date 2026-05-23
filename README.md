@@ -131,6 +131,37 @@ and refer to BD-UN-JB's own documentation for the rest.
 
 ---
 
+## Tuning: leak speed vs. stability
+
+The `cr_ref` leak runs across multiple pinned worker threads in
+parallel. The default is **4 cores** (cores 0–3; core 4 stays free for
+the orchestrator):
+
+```js
+// p2jb.js
+const LEAK_CORES = [0, 1, 2, 3];   // ~48 min, default
+```
+
+On hardware that's unstable at 4 cores (kernel panics during the leak
+phase, or runs that never reach `Stage 0`), dropping to fewer cores
+trades wall-clock time for stability — fewer parallel workers means
+less contention on the kernel `kqueueex` allocator and a markedly
+higher chance of completing.
+
+| `LEAK_CORES`     | wall time   | notes                              |
+|------------------|-------------|------------------------------------|
+| `[0, 1, 2, 3]`   | ~50 min     | default — fastest, less stable     |
+| `[0, 1, 2]`      | ~1h         | three-core (slightly more stable)  |
+| `[0, 1]`         | ~1h 30 min  | middle ground                      |
+| `[0]`            | ~2h         | single-core — slowest, most stable |
+
+To change it: open `p2jb.js`, search for `LEAK_CORES`, edit the array,
+save the file, and run `payload_sender.py` as usual. Try the default
+first; only fall back to fewer cores if you see kernel panics during
+the leak or if `Stage 0` doesn't appear after well over an hour.
+
+---
+
 ## Known limitations
 
 - ⚠️ **Closing the YouTube host app kernel-panics the console (WIP).**
