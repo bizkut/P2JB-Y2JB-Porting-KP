@@ -44,8 +44,8 @@ host process to root, enables the debug menu, and then loads
 `elfldr_1320` — exposing a remote ELF loader on TCP `:9021`.
 
 On **Y2JB 1.4+** this uses the built-in `kexp` shellcode handoff
-(no USB required). On **Y2JB 1.3** it falls back to loading the ELF
-binary from a USB drive.
+(no USB required). If that framework handoff is unavailable, the
+payload falls back to loading an ELF binary from a USB drive.
 
 ---
 
@@ -71,9 +71,10 @@ binary from a USB drive.
 - PlayStation 5 console running firmware **9.00 – 12.40** (tested on 11.60).
 - A PC on the same LAN as the PS5.
 
-A USB drive is only needed when running on an older Y2JB version
-(< 1.4). On Y2JB 1.4+ the built-in `kexp` shellcode loads
-`elfldr_1320` from the framework's own files on the console.
+A USB drive is normally only needed when running on an older Y2JB
+version (< 1.4), or when intentionally using the manual USB ELF-loader
+fallback. On Y2JB 1.4+ the built-in `kexp` shellcode loads `elfldr_1320`
+from the framework's own files on the console.
 
 ### Software (on PC)
 
@@ -94,13 +95,15 @@ A USB drive is only needed when running on an older Y2JB version
 
 ## Usage
 
-### 1. Prepare the USB drive (only if on Y2JB < 1.4)
+### 1. Prepare the USB drive (optional on Y2JB 1.4+)
 
 If your PS5 is running Y2JB 1.4 or newer, skip this step — the
-payload will automatically use the built-in `kexp` shellcode.
+payload will automatically use the built-in `kexp` shellcode first.
+USB remains available as a fallback.
 
-On an older Y2JB version, pick the right loader for your firmware and
-copy it to the **root** of your USB drive (FAT32 or exFAT):
+For the automatic USB fallback on older Y2JB versions, pick the right
+loader for your firmware and copy it to the **root** of your USB drive
+(FAT32 or exFAT):
 
 - **Firmware ≥ 11.00** → copy `elfldr_1320.elf` as `/elfldr_1320.elf`
 - **Firmware < 11.00**  → copy `elfldr.elf` as `/elfldr.elf`

@@ -2121,65 +2121,7 @@
             }
             let chainload_started = false;
             try {
-                // ----- Primary: USB ELF loader (preferred if present) -----
-                let elf_path = null;
-                const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
-                for (let u = 0; u < 8 && !elf_path; u++) {
-                    for (const name of usb_names) {
-                        const p = "/mnt/usb" + u + "/" + name;
-                        if (file_exists(p)) { elf_path = p; break; }
-                    }
-                }
-
-                if (elf_path &&
-                    typeof elf_parse === "function" &&
-                    typeof elf_run === "function" &&
-                    typeof elf_wait_for_exit === "function" &&
-                    typeof ipv6_kernel_rw !== "undefined") {
-                    await ulog("stage_elfldr: USB elfldr found at " + elf_path +
-                        " - using USB path (priority over kexp)");
-                    breadcrumb("stage_elfldr:usb_path " + elf_path);
-
-                    ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
-                    kernel.addr.data_base = S.data_base;
-                    await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
-                        ipv6_kernel_rw.data.master_sock + " victim_sock=" +
-                        ipv6_kernel_rw.data.victim_sock + ")");
-
-                    const elf_data = read_file(elf_path);
-                    await ulog("stage_elfldr: read " + elf_data.length +
-                        " bytes; parsing...");
-                    const entry = await elf_parse(elf_data);
-                    await ulog("stage_elfldr: elf entry=" + toHex(entry) +
-                        "; spawning elfldr...");
-                    const { thr_handle, payloadout } = await elf_run(entry, elf_path);
-                    chainload_started = true;
-
-                    breadcrumb("stage_elfldr:usb_spawned");
-                    await ulog("stage_elfldr: elfldr spawned - joining...");
-                    const is_daemon = elf_path.endsWith("elfldr_1320.elf") || elf_path.endsWith("elfldr.elf");
-                    await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
-                    if (!is_daemon) {
-                        const out = read32(payloadout);
-                        await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                    }
-                    await ulog("stage_elfldr: daemon should be listening on :9021");
-                    breadcrumb("stage_elfldr:usb_done");
-                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
-                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
-                    return;
-                }
-                if (elf_path) {
-                    await ulog("stage_elfldr: USB elf found at " + elf_path +
-                        " but missing deps: elf_parse=" + (typeof elf_parse) +
-                        " elf_run=" + (typeof elf_run) +
-                        " elf_wait_for_exit=" + (typeof elf_wait_for_exit) +
-                        " ipv6_kernel_rw=" + (typeof ipv6_kernel_rw));
-                } else {
-                    await ulog("stage_elfldr: no USB elf found on /mnt/usb0..7");
-                }
-
-                // ----- Fallback: Y2JB 1.4+ kexp handoff -----
+                // ----- Primary: Y2JB 1.4+ kexp handoff -----
                 if (typeof load_aioshellcode === "function") {
                     await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
                     breadcrumb("stage_elfldr:kexp_path");
@@ -2227,6 +2169,64 @@
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                         "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
                     return;
+                }
+
+                // ----- Fallback: USB ELF loader -----
+                let elf_path = null;
+                const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
+                for (let u = 0; u < 8 && !elf_path; u++) {
+                    for (const name of usb_names) {
+                        const p = "/mnt/usb" + u + "/" + name;
+                        if (file_exists(p)) { elf_path = p; break; }
+                    }
+                }
+
+                if (elf_path &&
+                    typeof elf_parse === "function" &&
+                    typeof elf_run === "function" &&
+                    typeof elf_wait_for_exit === "function" &&
+                    typeof ipv6_kernel_rw !== "undefined") {
+                    await ulog("stage_elfldr: USB elfldr found at " + elf_path +
+                        " - using USB fallback path");
+                    breadcrumb("stage_elfldr:usb_path " + elf_path);
+
+                    ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
+                    kernel.addr.data_base = S.data_base;
+                    await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
+                        ipv6_kernel_rw.data.master_sock + " victim_sock=" +
+                        ipv6_kernel_rw.data.victim_sock + ")");
+
+                    const elf_data = read_file(elf_path);
+                    await ulog("stage_elfldr: read " + elf_data.length +
+                        " bytes; parsing...");
+                    const entry = await elf_parse(elf_data);
+                    await ulog("stage_elfldr: elf entry=" + toHex(entry) +
+                        "; spawning elfldr...");
+                    const { thr_handle, payloadout } = await elf_run(entry, elf_path);
+                    chainload_started = true;
+
+                    breadcrumb("stage_elfldr:usb_spawned");
+                    await ulog("stage_elfldr: elfldr spawned - joining...");
+                    const is_daemon = elf_path.endsWith("elfldr_1320.elf") || elf_path.endsWith("elfldr.elf");
+                    await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
+                    if (!is_daemon) {
+                        const out = read32(payloadout);
+                        await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
+                    }
+                    await ulog("stage_elfldr: daemon should be listening on :9021");
+                    breadcrumb("stage_elfldr:usb_done");
+                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
+                    return;
+                }
+                if (elf_path) {
+                    await ulog("stage_elfldr: USB elf found at " + elf_path +
+                        " but missing deps: elf_parse=" + (typeof elf_parse) +
+                        " elf_run=" + (typeof elf_run) +
+                        " elf_wait_for_exit=" + (typeof elf_wait_for_exit) +
+                        " ipv6_kernel_rw=" + (typeof ipv6_kernel_rw));
+                } else {
+                    await ulog("stage_elfldr: no USB elf found on /mnt/usb0..7");
                 }
 
                 await ulog("stage_elfldr: no elfldr path available (USB not found, kexp unsupported)");
