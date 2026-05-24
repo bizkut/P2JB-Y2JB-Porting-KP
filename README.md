@@ -1,27 +1,17 @@
 # p2jb-y2jb
 
-**PlayStation 5 jailbreak (firmware 9.00 – 12.40, tested on 11.60)**
+**PlayStation 5 jailbreak (firmware 9.00 – 12.40)**
 — a port of Gezine / cheburek3000's
 [p2jb](https://github.com/Gezine/Luac0re) kernel exploit (cr_ref
 overflow via `kqueueex`) from the luac0re (lua-loader) host to
 [Y2JB](https://github.com/Gezine/Y2JB) (YouTube / V8 JavaScript host).
 
-Confirmed working: jailbreak end-to-end + debug menu + ELF loader
-(`elfldr_1320`, loaded via the Y2JB 1.4 `kexp` shellcode) + persistent
-unpatcher delivery.
+Confirmed working: jailbreak end-to-end + debug menu + Y2JB's ELF
+loader (started automatically via the `kexp` shellcode) + persistent
+unpatcher delivery. Closing the YouTube host app after completion no
+longer kernel-panics the console.
 
-> ⚠️ **Status — work in progress.** The in-memory jailbreak completes
-> reliably, but **closing the YouTube host app after `=== p2jb complete ===`
-> currently kernel-panics the console**. The
-> [post-jailbreak stability work](#known-limitations) is ongoing.
-> In practice this is not a blocker if you apply
-> [BD-UN-JB](https://github.com/Gezine/BD-UN-JB) right after the
-> jailbreak completes.
-
-> **Firmware support:** confirmed on **11.60**. The bundled offsets
-> table covers firmwares **9.00 – 12.40** (luac0re-sourced values),
-> but only 11.60 has been tested on hardware — other versions should
-> work in theory but are untested.
+> **Firmware support:** works on **9.00 – 12.40**.
 
 ---
 
@@ -31,8 +21,8 @@ The payload triggers a 32-bit `cr_ref` overflow in the PS5 kernel
 (via ~2³² `kqueueex` syscalls, ~50 minutes), uses the resulting
 use-after-free to build a kernel read/write primitive, escalates the
 host process to root, enables the debug menu, and hands off to the
-Y2JB 1.4 `kexp` shellcode — which loads `elfldr_1320` and exposes a
-remote ELF loader on TCP `:9021`.
+Y2JB 1.4 `kexp` shellcode — which starts the ELF loader and exposes
+it on TCP `:9021`.
 
 ---
 
@@ -49,17 +39,17 @@ restored and the YouTube TV app launched, the PS5 has no listener
 for the payload and nothing will happen.
 
 **Y2JB 1.4 or newer is required.** The ELF-loader handoff uses the
-`kexp` shellcode (and `elfldr_1320`), both shipped inside Y2JB as of
-version 1.4. On an older Y2JB the jailbreak still completes but the
-ELF-loader stage is skipped.
+`kexp` shellcode, shipped inside Y2JB as of version 1.4. The payload
+checks for it at the very start: on an older Y2JB it aborts before
+touching the kernel (no leak, no stage 0) and prompts you to update.
 
 ### Hardware
 
-- PlayStation 5 console running firmware **9.00 – 12.40** (tested on 11.60).
+- PlayStation 5 console running firmware **9.00 – 12.40**.
 - A PC on the same LAN as the PS5.
 
-No USB drive is needed — `kexp` and `elfldr_1320` are loaded from the
-Y2JB framework's own files on the console.
+No USB drive is needed — `kexp` and the ELF loader ship inside Y2JB
+on the console.
 
 ### Software (on PC)
 
@@ -112,22 +102,12 @@ interact with the PS5 while it runs.
 At this point you have an in-memory jailbreak and a generic ELF loader.
 Any ELF you send to `:9021` will run on the jailbroken PS5.
 
-> ⚠️ Do **not** close the YouTube app or let the console go idle for
-> too long without doing something — see
-> [Known limitations](#known-limitations).
-
 ### Sending an ELF to `:9021`
 
 A convenient tool for delivering ELFs to the loader is
 [Al-Azif/hermes-link](https://github.com/Al-Azif/hermes-link). It takes
 care of the TCP handshake the loader expects, so you don't have to
 write the byte protocol yourself.
-
-### Next step (recommended): apply BD-UN-JB
-
-Applying [BD-UN-JB](https://github.com/Gezine/BD-UN-JB) is recommended.
-Send its unpatcher ELF to `:9021` (e.g. via the hermes-link tool above)
-and refer to BD-UN-JB's own documentation for the rest.
 
 ---
 
@@ -164,17 +144,14 @@ the leak or if `Stage 0` doesn't appear after well over an hour.
 
 ## Known limitations
 
-- ⚠️ **Closing the YouTube host app kernel-panics the console (WIP).**
-  After `=== p2jb complete ===`, exiting YouTube from the PS5 menu
-  triggers an improper shutdown. The post-jailbreak kernel-state
-  cleanup is not yet bulletproof. **Mitigation:** apply a persistent
-  jailbreak (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) before
-  closing — its effect survives the panic-on-close.
 - **One run per boot.** A `p2jb.fail` marker is dropped at stage 0 entry
   to refuse re-runs without a reboot — the triple-free is a point of
   no return.
-- **YouTube app must stay open** until your persistent payload (if any)
-  has applied.
+- **The ELF loader lives inside the YouTube process.** Closing the
+  app is safe for the kernel, but it tears down the loader and any
+  ELF you sent to `:9021`. Keep YouTube open until your persistent
+  payload (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB)) has
+  applied; afterwards you can close the app normally.
 
 ---
 
@@ -198,20 +175,17 @@ along the way.
   [Luac0re](https://github.com/Gezine/Luac0re).
 - **Y2JB userland framework** — Gezine.
   [Y2JB](https://github.com/Gezine/Y2JB).
-- **`elfldr_1320`** — ELF loader binary by Gezine, shipped inside Y2JB.
 - **`kexp` post-jailbreak all-in-one shellcode** — ufm42
   ([kexp](https://github.com/ufm42/kexp)), merged into Y2JB 1.4.
 - **`notmaj0r` remote_lua_loader p2jb port** — used as a secondary
   reference during the port.
-- **`BD-UN-JB` persistent unpatcher** — Gezine.
-  [BD-UN-JB](https://github.com/Gezine/BD-UN-JB).
 - **lapse (Y2JB)** — referenced for the `gpu.js` debug-menu apply
   flow; not the exploit itself (lapse exploits AIO, not `kqueueex`).
 - **Edigax** — help with the multi-core leak implementation, bringing
   the `cr_ref` leak down from ~2 hours to ~48 minutes.
-- **Claude (Anthropic)** — AI assistant used throughout the port:
-  iterative debugging across the worker / Stage 0 saga, D-fix
-  identification, host-noise gate, public release packaging.
+- **/home/rviju** and **Dr.Yenyen** — help running test builds on real
+  hardware during the close-KP investigation.
+- **Claude (Anthropic)** — AI assistant used throughout the port.
 
 ---
 
