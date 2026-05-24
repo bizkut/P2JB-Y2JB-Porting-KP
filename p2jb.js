@@ -1,6 +1,6 @@
 /*
  * p2jb-y2jb - PS5 jailbreak port to Y2JB (YouTube/JS), tested on FW 11.60,
- *            offsets bundled for FW 9.00 - 12.70.
+ *            offsets bundled for FW 9.00 - 12.40.
  * MIT License - see LICENSE.
  *
  * Credits:
@@ -139,7 +139,6 @@
             "11.00": "11.00", "11.02": "11.00", "11.20": "11.00", "11.40": "11.00",
             "11.50": "11.00", "11.60": "11.00", "11.61": "11.00",
             "12.00": "12.00", "12.02": "12.00", "12.20": "12.00", "12.40": "12.00",
-            "12.50": "12.00", "12.60": "12.00", "12.70": "12.00",
         };
 
         function ensure_kernel_offset() {

@@ -1,6 +1,6 @@
 # p2jb-y2jb
 
-**PlayStation 5 jailbreak (firmware 9.00 - 12.70, tested on 11.60)**
+**PlayStation 5 jailbreak (firmware 9.00 - 12.40, tested on 11.60)**
 — a port of Gezine / cheburek3000's
 [p2jb](https://github.com/Gezine/Luac0re) kernel exploit (cr_ref
 overflow via `kqueueex`) from the luac0re (lua-loader) host to
@@ -29,7 +29,7 @@ ELF-loader delivery method (kexp handoff on 1.4+, USB fallback on 1.3).
 > the jailbreak completes.
 
 > **Firmware support:** confirmed on **11.60**. The bundled P2JB offsets
-> table covers firmwares **9.00 - 12.70** (luac0re-sourced values),
+> table covers firmwares **9.00 - 12.40** (luac0re-sourced values),
 > but only 11.60 has been tested on hardware — other versions should
 > work in theory but are untested.
 
@@ -68,7 +68,7 @@ binary from a USB drive.
 
 ### Hardware
 
-- PlayStation 5 console running firmware **9.00 - 12.70** (tested on 11.60).
+- PlayStation 5 console running firmware **9.00 - 12.40** (tested on 11.60).
 - A PC on the same LAN as the PS5.
 
 A USB drive is normally only needed when running on an older Y2JB
