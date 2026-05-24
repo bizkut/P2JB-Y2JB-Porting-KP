@@ -2126,6 +2126,7 @@
                     await ulog("stage_elfldr: dynlib patched " +
                         "(syscalls + dlsym unrestricted)");
 
+                    kernel.addr.data_base = S.data_base;
                     const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
                     const kexp_pipes = await prepare_kexp_pipes(S);
                     const master_pipe = kexp_pipes.master_pipe;
