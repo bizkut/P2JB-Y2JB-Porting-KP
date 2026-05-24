@@ -1,24 +1,24 @@
 # p2jb-y2jb
 
-**PlayStation 5 jailbreak (firmware 9.00 – 12.40, tested on 11.60)**
+**PlayStation 5 jailbreak (firmware 9.00 - 12.70, tested on 11.60)**
 — a port of Gezine / cheburek3000's
 [p2jb](https://github.com/Gezine/Luac0re) kernel exploit (cr_ref
 overflow via `kqueueex`) from the luac0re (lua-loader) host to
 [Y2JB](https://github.com/Gezine/Y2JB) (YouTube / V8 JavaScript host).
 
 Confirmed working: jailbreak end-to-end + debug menu + ELF loader
-(`elfldr_1320`, via Y2JB 1.4 `kexp` shellcode or USB fallback) +
+(`elfldr.elf`, via Y2JB 1.4 `kexp` shellcode or USB fallback) +
 persistent unpatcher delivery.
 
 **Compatible with both Y2JB 1.3 and Y2JB 1.4.** The payload
 automatically detects the framework version and uses the appropriate
 ELF-loader delivery method (kexp handoff on 1.4+, USB fallback on 1.3).
 
-> **Status:** The in-memory jailbreak completes reliably. The
-> `elfldr` ELF loader is intentionally spawned as a **daemon thread
-> inside the YouTube process** (this is how both the legacy USB path
-> and the Y2JB 1.4 `kexp` shellcode launch it). Because of this,
-> **closing YouTube also terminates `elfldr`.**
+> **Status:** The in-memory jailbreak completes reliably. The bundled
+> `elfldr.elf` is a single loader for every firmware version supported
+> by this P2JB port. Its own SDK-side firmware table reaches 13.20, but
+> this repository's JavaScript exploit offsets define the actual P2JB
+> firmware range.
 >
 > The post-jailbreak cleanup neutralizes the known panic-on-close
 > hazards: corrupted `ipv6_kernel_rw` socket `pktinfo` pointers,
@@ -28,8 +28,8 @@ ELF-loader delivery method (kexp handoff on 1.4+, USB fallback on 1.3).
 > apply [BD-UN-JB](https://github.com/Gezine/BD-UN-JB) as usual after
 > the jailbreak completes.
 
-> **Firmware support:** confirmed on **11.60**. The bundled offsets
-> table covers firmwares **9.00 – 12.40** (luac0re-sourced values),
+> **Firmware support:** confirmed on **11.60**. The bundled P2JB offsets
+> table covers firmwares **9.00 - 12.70** (luac0re-sourced values),
 > but only 11.60 has been tested on hardware — other versions should
 > work in theory but are untested.
 
@@ -41,7 +41,7 @@ The payload triggers a 32-bit `cr_ref` overflow in the PS5 kernel
 (via ~2³² `kqueueex` syscalls, ~50 minutes), uses the resulting
 use-after-free to build a kernel read/write primitive, escalates the
 host process to root, enables the debug menu, and then loads
-`elfldr_1320` — exposing a remote ELF loader on TCP `:9021`.
+`elfldr.elf` — exposing a remote ELF loader on TCP `:9021`.
 
 On **Y2JB 1.4+** this uses the built-in `kexp` shellcode handoff
 (no USB required). If that framework handoff is unavailable, the
@@ -68,13 +68,14 @@ binary from a USB drive.
 
 ### Hardware
 
-- PlayStation 5 console running firmware **9.00 – 12.40** (tested on 11.60).
+- PlayStation 5 console running firmware **9.00 - 12.70** (tested on 11.60).
 - A PC on the same LAN as the PS5.
 
 A USB drive is normally only needed when running on an older Y2JB
 version (< 1.4), or when intentionally using the manual USB ELF-loader
-fallback. On Y2JB 1.4+ the built-in `kexp` shellcode loads `elfldr_1320`
-from the framework's own files on the console.
+fallback. On Y2JB 1.4+ the built-in `kexp` shellcode loads the framework's
+own ELF loader from the console. This repo itself ships one USB fallback
+loader, `elfldr.elf`.
 
 ### Software (on PC)
 
@@ -86,10 +87,9 @@ from the framework's own files on the console.
 ### Files
 
 - `p2jb.js` — the jailbreak payload (this repo).
-- `elfldr_1320.elf` — ELF loader for **firmware ≥ 11.00**. Binary by Gezine.
-- `elfldr.elf` — ELF loader for **firmware < 11.00**. Use this one on
-  older FWs (it's the legacy binary that predates the `_1320` build).
-  Both files are bundled here for convenience.
+- `elfldr.elf` — single ELF loader for every firmware version supported by
+  this P2JB port. The loader binary itself has SDK support through 13.20,
+  but P2JB is limited by the JavaScript offset table above.
 
 ---
 
@@ -101,15 +101,13 @@ If your PS5 is running Y2JB 1.4 or newer, skip this step — the
 payload will automatically use the built-in `kexp` shellcode first.
 USB remains available as a fallback.
 
-For the automatic USB fallback on older Y2JB versions, pick the right
-loader for your firmware and copy it to the **root** of your USB drive
-(FAT32 or exFAT):
-
-- **Firmware ≥ 11.00** → copy `elfldr_1320.elf` as `/elfldr_1320.elf`
-- **Firmware < 11.00**  → copy `elfldr.elf` as `/elfldr.elf`
+For the automatic USB fallback on older Y2JB versions, copy `elfldr.elf`
+to the **root** of your USB drive (FAT32 or exFAT). The preferred name is
+`/elfldr.elf`; the legacy `/elfldr_1320.elf` name is still recognized if
+you already have that layout on a USB drive.
 
 Then plug the USB into the PS5 before launching the payload. The
-payload scans `/mnt/usb0`..`/mnt/usb7` and accepts either filename.
+payload scans `/mnt/usb0`..`/mnt/usb7`.
 
 ### 2. Launch the YouTube app on the PS5 and wait
 
@@ -163,11 +161,12 @@ the PS5 while it runs.
 At this point you have an in-memory jailbreak and a generic ELF loader.
 Any ELF you send to `:9021` will run on the jailbroken PS5.
 
-> ⚠️ Do **not** close the YouTube app.** `elfldr` is a daemon thread
-> inside YouTube; closing the app kills the loader and may kernel-panic
-> the console due to corrupted kernel state left by the jailbreak.
-> Apply a persistent payload (e.g. BD-UN-JB) while YouTube is still
-> open — see [Known limitations](#known-limitations).
+> Closing YouTube after the `:9021` listener is up should not kill the
+> ptrace-bootstrap `elfldr.elf` socket server, because it is spawned into
+> a separate process. Close stability is still hardware-test pending
+> because the exploit cleanup has to restore process-owned kernel state.
+> Apply a persistent payload (e.g. BD-UN-JB) before relying on this across
+> long sessions — see [Known limitations](#known-limitations).
 
 ### Sending an ELF to `:9021`
 
@@ -186,10 +185,12 @@ and refer to BD-UN-JB's own documentation for the rest.
 
 ## Known limitations
 
-- **Closing YouTube may kernel-panic the console.** The panic is caused
+- **Closing YouTube may still kernel-panic the console.** The panic is caused
   by corrupted kernel state left behind from the jailbreak (forged pipe
   buffers, dangling socket `pktinfo` pointers, altered credentials), not
-  by `elfldr` itself. Cleanup code attempts to restore the original
+  by `elfldr` itself. The ptrace-bootstrap loader is designed to move the
+  `:9021` socket server into a separate process, so the loader should
+  survive after the bootstrap completes. Cleanup code attempts to restore the original
   state on both the success path and the late-failure path, but this
   has not been fully verified on hardware. **Keep applying a persistent
   jailbreak** (e.g. [BD-UN-JB](https://github.com/Gezine/BD-UN-JB))
@@ -200,12 +201,9 @@ and refer to BD-UN-JB's own documentation for the rest.
 - **One run per boot.** A `p2jb.fail` marker is dropped at stage 0 entry
   to refuse re-runs without a reboot — the triple-free is a point of
   no return.
-- **`elfldr` is a daemon thread inside the YouTube process.** Whether it
-  is launched via the Y2JB 1.4 `kexp` shellcode or the legacy USB path,
-  it lives inside the YouTube process. Closing the YouTube app kills
-  `elfldr` and — because of the corrupted kernel state noted above —
-  may also trigger a kernel panic. Apply your persistent payload
-  (e.g. BD-UN-JB) while YouTube is still open.
+- **USB loader lookup is intentionally simple.** The repo ships
+  `elfldr.elf`, and the fallback scanner checks the USB root for
+  `elfldr.elf` or the legacy `elfldr_1320.elf` name.
 
 ---
 
@@ -229,7 +227,7 @@ along the way.
   [Luac0re](https://github.com/Gezine/Luac0re).
 - **Y2JB userland framework** — Gezine.
   [Y2JB](https://github.com/Gezine/Y2JB).
-- **`elfldr_1320`** — ELF loader binary by Gezine, shipped inside Y2JB.
+- **`elfldr`** — ELF loader by Gezine / ps5-payload-dev.
 - **`kexp` post-jailbreak all-in-one shellcode** — ufm42
   ([kexp](https://github.com/ufm42/kexp)), merged into Y2JB 1.4.
 - **`notmaj0r` remote_lua_loader p2jb port** — used as a secondary

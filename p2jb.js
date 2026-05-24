@@ -1,13 +1,13 @@
 /*
  * p2jb-y2jb - PS5 jailbreak port to Y2JB (YouTube/JS), tested on FW 11.60,
- *            offsets bundled for FW 9.00 - 12.40.
+ *            offsets bundled for FW 9.00 - 12.70.
  * MIT License - see LICENSE.
  *
  * Credits:
  *   - p2jb kernel exploit (cr_ref overflow via kqueueex): Gezine / cheburek3000
  *     (https://github.com/Gezine/Luac0re)
  *   - Y2JB userland framework: Gezine (https://github.com/Gezine/Y2JB)
- *   - elfldr_1320 ELF loader binary: Gezine
+ *   - elfldr ELF loader binary: Gezine / ps5-payload-dev
  *   - notmaj0r remote_lua_loader p2jb port (secondary reference)
  *
  * Usage: see README.md.
@@ -347,6 +347,23 @@
             }
             const out = read32(payloadout);
             await log("[p2jb] elfldr out = " + toHex(out));
+        }
+
+        function elf_data_contains_ascii(elf_data, needle) {
+            if (!elf_data || !needle) return false;
+            const n = needle.length;
+            const limit = elf_data.length - n;
+            for (let i = 0; i <= limit; i++) {
+                let ok = true;
+                for (let j = 0; j < n; j++) {
+                    if (elf_data[i + j] !== needle.charCodeAt(j)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) return true;
+            }
+            return false;
         }
 
         // Expose ELF loader for post-jailbreak use on any available global
@@ -2070,6 +2087,13 @@
                         ipv6_kernel_rw.data.victim_sock + ")");
 
                     const elf_data = read_file(elf_path);
+                    const is_ptrace_bootstrap =
+                        elf_data_contains_ascii(elf_data, "Bootstrapping elfldr.elf") &&
+                        elf_data_contains_ascii(elf_data, "SceRedisServer") &&
+                        elf_data_contains_ascii(elf_data, "Spawning elfldr.elf");
+                    if (!is_ptrace_bootstrap) {
+                        throw new Error("USB elfldr is not the ptrace bootstrap build");
+                    }
                     await ulog("stage_elfldr: read " + elf_data.length +
                         " bytes; parsing...");
                     const entry = await elf_parse(elf_data);
@@ -2078,7 +2102,9 @@
                     const { thr_handle, payloadout } = await elf_run(entry, elf_path);
                     chainload_started = true;
                     await ulog("stage_elfldr: elfldr spawned - joining...");
-                    const is_daemon = elf_path.endsWith("elfldr_1320.elf") || elf_path.endsWith("elfldr.elf");
+                    const is_daemon = false;
+                    await ulog("stage_elfldr: ptrace bootstrap build detected - " +
+                        "joining until socksrv is spawned in a separate process");
                     await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
                     if (!is_daemon) {
                         const out = read32(payloadout);
@@ -2298,16 +2324,18 @@
         } catch (e) {
             if (S.kernel_rw_ready && !cleanup_done) {
                 try {
-                    await cleanup_exploit_pipes(S);
-                    await cleanup_ipv6_kernel_rw(S);
                     await cleanup_kernel_state(S);
+                    await cleanup_ipv6_kernel_rw(S);
+                    await cleanup_exploit_pipes(S);
                 } catch (_) { }
             }
             throw e;
         }
 
-        // Success path: neutralize corrupted pipe buffers so YouTube can close safely
+        // Success path: restore process-owned kernel state, then neutralize
+        // corrupted pipe buffers so YouTube can close safely.
         try {
+            await cleanup_kernel_state(S);
             await cleanup_exploit_pipes(S);
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
                 try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
