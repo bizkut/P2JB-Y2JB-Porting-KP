@@ -35,6 +35,10 @@
 
         const F_SETFL = 4n;
         const O_NONBLOCK = 4n;
+        const O_RDONLY = 0n;
+        const O_WRONLY = 1n;
+        const O_CREAT = 0x200n;
+        const O_TRUNC = 0x400n;
 
         const SYSTEM_AUTHID = 0x4800000000010003n;
 
@@ -500,8 +504,16 @@
         }
         function fail(msg) { throw new Error("p2jb: " + msg); }
 
+        function alloc_string(s) {
+            const buf = malloc(s.length + 1);
+            for (let i = 0; i < s.length; i++) write8(buf + BigInt(i), s.charCodeAt(i));
+            write8(buf + BigInt(s.length), 0);
+            return buf;
+        }
+
         let breadcrumb_fd = -1n;
         let breadcrumb_path = "";
+        let breadcrumb_buf = null;
 
         function init_breadcrumbs() {
             if (!KP_BREADCRUMBS || breadcrumb_fd !== -1n) return;
@@ -525,8 +537,14 @@
             if (!KP_BREADCRUMBS || breadcrumb_fd === -1n) return;
             try {
                 const text = "[p2jb] " + msg + "\n";
-                syscall(SYSCALL.write, breadcrumb_fd, alloc_string(text),
-                    BigInt(text.length));
+                const len = text.length;
+                if (!breadcrumb_buf || len > 256) {
+                    breadcrumb_buf = alloc_string(text);
+                } else {
+                    for (let i = 0; i < len; i++) write8(breadcrumb_buf + BigInt(i), text.charCodeAt(i));
+                    write8(breadcrumb_buf + BigInt(len), 0);
+                }
+                syscall(SYSCALL.write, breadcrumb_fd, breadcrumb_buf, BigInt(len));
             } catch (_) { }
         }
 
@@ -2514,6 +2532,10 @@
             breadcrumb("success_cleanup:done");
         } catch (_) { }
 
+        if (breadcrumb_fd !== -1n) {
+            try { syscall(SYSCALL.close, breadcrumb_fd); } catch (_) { }
+            breadcrumb_fd = -1n;
+        }
         breadcrumb("complete");
         await ulog("=== p2jb complete ===");
 
