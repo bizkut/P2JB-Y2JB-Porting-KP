@@ -19,6 +19,10 @@
 
         const PAGE_SIZE = 0x4000;
 
+        const PROT_READ  = 1n;
+        const PROT_WRITE = 2n;
+        const PROT_EXEC  = 4n;
+
         const AF_UNIX = 1n;
         const AF_INET6 = 28n;
         const SOCK_STREAM = 1n;
