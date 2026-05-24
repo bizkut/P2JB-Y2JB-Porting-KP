@@ -1987,7 +1987,7 @@
 
             const master_rpipe_data = get_fdata(master_pipe[0]);
             const victim_rpipe_data = get_fdata(victim_pipe[0]);
-            for (const fd of master_pipe.concat(victim_pipe)) bump_file_ref(fd, 0x100);
+            for (const fd of master_pipe.concat(victim_pipe)) bump_file_ref(fd, 1);
 
             S.kwrite32(master_rpipe_data + 0x00n, 0n);
             S.kwrite32(master_rpipe_data + 0x04n, 0n);
@@ -2057,6 +2057,7 @@
                         " master=" + master_pipe[0] + "," + master_pipe[1] +
                         " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
                     await load_aioshellcode(allproc, master_pipe, victim_pipe);
+                    S.kexp_pipes_handed_off = true;
                     chainload_started = true;
                     S.elfldr_started = true;
                     await ulog("stage_elfldr: load_aioshellcode returned - " +
@@ -2114,6 +2115,7 @@
                         const out = read32(payloadout);
                         await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
                     }
+                    S.ipv6_kernel_rw_handed_off = true;
                     S.elfldr_started = true;
                     await ulog("stage_elfldr: daemon should be listening on :9021");
                     send_notification("Stage 7\nelfldr running - send your ELF to\n" +
@@ -2137,14 +2139,18 @@
                 send_notification("Stage 7\nelfldr failed: " + e.message +
                     "\n(jailbreak still complete)");
             } finally {
-                await cleanup_kexp_pipes(S);
-                await cleanup_ipv6_kernel_rw(S);
+                if (!S.kexp_pipes_handed_off) await cleanup_kexp_pipes(S);
+                if (!S.ipv6_kernel_rw_handed_off) await cleanup_ipv6_kernel_rw(S);
             }
         }
 
         async function cleanup_kexp_pipes(S) {
             try {
                 if (!S.kexp_pipes) return;
+                if (S.kexp_pipes_handed_off) {
+                    await ulog("cleanup: kexp pipes owned by loader - left intact");
+                    return;
+                }
                 const m = S.kexp_pipes.master_rpipe_data;
                 const v = S.kexp_pipes.victim_rpipe_data;
                 // Always zero master first: its buffer ptr points at victim.
@@ -2206,6 +2212,10 @@
 
         async function cleanup_ipv6_kernel_rw(S) {
             try {
+                if (S.ipv6_kernel_rw_handed_off) {
+                    await ulog("cleanup: ipv6_kernel_rw owned by USB elfldr - left intact");
+                    return;
+                }
                 if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
                     const so_pcb_off = S.OFF.SO_PCB !== undefined ? BigInt(S.OFF.SO_PCB) : 0x18n;
@@ -2250,7 +2260,7 @@
 
         async function close_cleaned_aux_fds(S) {
             try {
-                if (S.kexp_pipes) {
+                if (S.kexp_pipes && !S.kexp_pipes_handed_off) {
                     for (const fd of []
                         .concat(S.kexp_pipes.master_pipe || [])
                         .concat(S.kexp_pipes.victim_pipe || [])) {
@@ -2258,7 +2268,8 @@
                     }
                     await ulog("cleanup: kexp pipe fds closed");
                 }
-                if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+                if (!S.ipv6_kernel_rw_handed_off &&
+                    typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                     const d = ipv6_kernel_rw.data;
                     for (const fd of [d.master_sock, d.victim_sock, d.pipe_read_fd, d.pipe_write_fd]) {
                         if (fd !== undefined && fd >= 0) {
@@ -2346,14 +2357,15 @@
                 await expect_pipe_zero("exploit.victim_pipe", S.victim_pipe_data);
             }
 
-            if (typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
+            if (!S.ipv6_kernel_rw_handed_off &&
+                typeof ipv6_kernel_rw !== "undefined" && ipv6_kernel_rw.data) {
                 const d = ipv6_kernel_rw.data;
                 await verify_sock_pktinfo_zero(d.master_sock, "ipv6.master_sock");
                 await verify_sock_pktinfo_zero(d.victim_sock, "ipv6.victim_sock");
                 await expect_pipe_zero("ipv6.pipe", d.pipe_addr);
             }
 
-            if (S.kexp_pipes) {
+            if (S.kexp_pipes && !S.kexp_pipes_handed_off) {
                 await expect_pipe_zero("kexp.master_pipe", S.kexp_pipes.master_rpipe_data);
                 await expect_pipe_zero("kexp.victim_pipe", S.kexp_pipes.victim_rpipe_data);
             }
