@@ -59,7 +59,7 @@
 
         // Decrypted libkernel_web.sprx offset registry for high-frequency clean leak loop.
         // If your firmware is missing, extract & contribute offsets using this utility:
-        // https://github.com/bizkut/libkernel_web_offset_finder
+        // https://github.com/bizkut/ps5-offset-finder
         const LIBKERNEL_SPRX_OFFSETS = {
             "11.60": {
                 CLEAN_SYSCALL_WRAPPER: 0x1A8D7n,
