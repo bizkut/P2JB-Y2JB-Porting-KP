@@ -39,19 +39,29 @@ for the backup file and the restore procedure. Without Y2JB
 restored and the YouTube TV app launched, the PS5 has no listener
 for the payload and nothing will happen.
 
-**Y2JB 1.3 or newer.** The payload reads the bundled ELF loader
-(`elfldr_1320_v5.elf` on 1.4, `elfldr.elf` on 1.3) directly from the
-sandbox slot. The payload checks at the very start that the framework
-helpers it needs are in scope: if anything is missing it aborts before
-touching the kernel (no leak, no stage 0).
+**Y2JB 1.3 or newer.** The ELF loader is delivered differently
+depending on Y2JB version:
+
+- **Y2JB 1.4+**: the payload reads `elfldr_1320_v5.elf` directly from
+  the Y2JB sandbox slot — no USB needed.
+- **Y2JB 1.3**: Y2JB 1.3 bundles an outdated `elfldr.elf` that does
+  not work on the current kernels, so the payload reads
+  `elfldr_1320.elf` from a USB stick plugged into the PS5
+  (`/mnt/usb0` ... `/mnt/usb7`). Grab `elfldr_1320_v5.elf` from this
+  repo, put it on the root of a FAT32/exFAT USB (you can rename it
+  to `elfldr_1320.elf` or `elfldr.elf` if you prefer — all three are
+  probed), and plug the USB in **before** launching the payload.
+
+At the very start the payload checks the framework helpers it needs
+are in scope: if anything is missing it aborts before touching the
+kernel (no leak, no stage 0).
 
 ### Hardware
 
 - PlayStation 5 console running firmware **9.00 – 12.40**.
 - A PC on the same LAN as the PS5.
-
-No USB drive is needed — the ELF loader ships inside Y2JB on the
-console; the payload reads it directly from the sandbox.
+- **(Y2JB 1.3 only)** A FAT32/exFAT USB stick with `elfldr_1320.elf`
+  on its root. On Y2JB 1.4+ no USB is needed.
 
 ### Software (on PC)
 
@@ -63,6 +73,10 @@ console; the payload reads it directly from the sandbox.
 ### Files
 
 - `p2jb.js` — the jailbreak payload (this repo).
+- `elfldr_1320_v5.elf` — Gezine's ELF loader binary, included here
+  for Y2JB 1.3 users who need to provide it via USB. On Y2JB 1.4+ the
+  same file is already bundled inside the framework, so you can ignore
+  this one.
 
 ---
 

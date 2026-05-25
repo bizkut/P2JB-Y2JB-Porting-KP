@@ -15,7 +15,7 @@
 
 (async function () {
     try {
-        const p2jb_version = "P2JB 2.4 (Y2JB port)";
+        const p2jb_version = "P2JB 2.5 (Y2JB port)";
 
         const PAGE_SIZE = 0x4000;
 
@@ -63,7 +63,6 @@
         const LIBKERNEL_SPRX_OFFSETS = {
             "11.60": {
                 CLEAN_SYSCALL_WRAPPER: 0x1A8D7n,
-                KQUEUEEX_WRAPPER:      0x1BDD0n,
                 GETTIMEOFDAY:          0x1D150n,
             }
         };
@@ -2172,6 +2171,17 @@
             return { thr_handle: read64(thr_handle_addr), payloadout };
         }
 
+        function resolve_title_id() {
+            if (typeof TITLE_ID === "string" && TITLE_ID.length > 0) return TITLE_ID;
+            if (typeof get_title_id === "function") {
+                try {
+                    const t = get_title_id();
+                    if (typeof t === "string" && t.length > 0) return t;
+                } catch (_) { }
+            }
+            return null;
+        }
+
         async function stage_load_elf(S) {
             await ulog("stage_elfldr: entered (sandbox-slot elf_run handoff)");
             if (!S.data_base_ok) {
@@ -2181,26 +2191,50 @@
             }
             try {
 
-                const ELFLDR_NAMES = ["elfldr_1320_v5.elf", "elfldr.elf"];
-                const SANDBOX_BASE = "/download0/cache/splash_screen/" +
-                    "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
-                let elf_path = null;
-                outer:
-                for (const slot of ["000", "001", "002"]) {
-                    for (const name of ELFLDR_NAMES) {
-                        const p = "/mnt/sandbox/" + TITLE_ID + "_" + slot +
-                            SANDBOX_BASE + name;
-                        if (file_exists(p)) { elf_path = p; break outer; }
+                const is_y2jb_14 = (typeof TITLE_ID === "string" && TITLE_ID.length > 0);
+                let elf_path = null, elf_source = null;
+                if (is_y2jb_14) {
+                    const ELFLDR_NAMES_SBX = ["elfldr_1320_v5.elf"];
+                    const SANDBOX_BASE = "/download0/cache/splash_screen/" +
+                        "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
+                    const title_id = resolve_title_id();
+                    outer:
+                    for (const slot of ["000", "001", "002"]) {
+                        for (const name of ELFLDR_NAMES_SBX) {
+                            const p = "/mnt/sandbox/" + title_id + "_" + slot +
+                                SANDBOX_BASE + name;
+                            if (file_exists(p)) {
+                                elf_path = p; elf_source = "sandbox"; break outer;
+                            }
+                        }
+                    }
+                    if (!elf_path) {
+                        await ulog("stage_elfldr: elfldr_1320_v5.elf not in any " +
+                            "Y2JB 1.4 sandbox slot - skipped");
+                        send_notification("Stage 7\nelfldr not in sandbox\n" +
+                            "(jailbreak still complete)");
+                        return;
+                    }
+                } else {
+                    const ELFLDR_NAMES_USB = ["elfldr_1320_v5.elf",
+                        "elfldr_1320.elf", "elfldr.elf"];
+                    for (let u = 0; u < 8 && !elf_path; u++) {
+                        for (const name of ELFLDR_NAMES_USB) {
+                            const p = "/mnt/usb" + u + "/" + name;
+                            if (file_exists(p)) {
+                                elf_path = p; elf_source = "usb"; break;
+                            }
+                        }
+                    }
+                    if (!elf_path) {
+                        await ulog("stage_elfldr: elfldr not found on /mnt/usb0..7 " +
+                            "(Y2JB 1.3 requires USB delivery) - skipped");
+                        send_notification("Stage 7\nelfldr not on USB\n" +
+                            "(put elfldr_1320.elf on USB and retry)");
+                        return;
                     }
                 }
-                if (!elf_path) {
-                    await ulog("stage_elfldr: no bundled elfldr found in any " +
-                        "Y2JB sandbox slot - skipped");
-                    send_notification("Stage 7\nelfldr not in sandbox\n" +
-                        "(jailbreak still complete)");
-                    return;
-                }
-                await ulog("stage_elfldr: found " + elf_path);
+                await ulog("stage_elfldr: found (" + elf_source + ") " + elf_path);
 
                 ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
                 kernel.addr.data_base = S.data_base;
@@ -2240,12 +2274,13 @@
         send_notification(p2jb_version + "\nport by matem6");
 
         {
+            const title_id = resolve_title_id();
             if (typeof ipv6_kernel_rw === "undefined" ||
-                typeof TITLE_ID !== "string" || TITLE_ID.length === 0 ||
+                title_id === null ||
                 typeof file_exists !== "function" ||
                 typeof read_file !== "function") {
                 await ulog("FATAL: Y2JB framework helpers missing " +
-                    "(ipv6_kernel_rw / TITLE_ID / file_exists / read_file)");
+                    "(ipv6_kernel_rw / title_id / file_exists / read_file)");
                 send_notification("p2jb: Y2JB framework helpers missing\n" +
                     "(update y2jb and retry)");
                 return;
