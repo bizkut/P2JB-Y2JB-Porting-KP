@@ -15,7 +15,7 @@
 
 (async function () {
     try {
-        const p2jb_version = "P2JB 2.5 (Y2JB port)";
+        const p2jb_version = "P2JB 2.5.1 (Y2JB port)";
 
         const PAGE_SIZE = 0x4000;
 
@@ -146,12 +146,6 @@
         };
 
         function ensure_kernel_offset() {
-            try {
-                if (typeof kernel_offset === "object" && kernel_offset !== null
-                    && kernel_offset.DATA_BASE_ALLPROC !== undefined) return;
-                kernel_offset = get_kernel_offset();
-                return;
-            } catch (_) { }
 
             let key = FW_VERSION;
             if (FW_ALIAS_P2JB[key]) key = FW_ALIAS_P2JB[key];
@@ -2274,13 +2268,16 @@
         send_notification(p2jb_version + "\nport by matem6");
 
         {
-            const title_id = resolve_title_id();
+
+            const has_title_id = (typeof TITLE_ID === "string" && TITLE_ID.length > 0)
+                || (typeof get_title_id === "function");
             if (typeof ipv6_kernel_rw === "undefined" ||
-                title_id === null ||
+                !has_title_id ||
                 typeof file_exists !== "function" ||
                 typeof read_file !== "function") {
                 await ulog("FATAL: Y2JB framework helpers missing " +
-                    "(ipv6_kernel_rw / title_id / file_exists / read_file)");
+                    "(ipv6_kernel_rw / TITLE_ID|get_title_id / " +
+                    "file_exists / read_file)");
                 send_notification("p2jb: Y2JB framework helpers missing\n" +
                     "(update y2jb and retry)");
                 return;
