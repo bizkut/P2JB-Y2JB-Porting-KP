@@ -7,7 +7,7 @@ overflow via `kqueueex`) from the luac0re (lua-loader) host to
 [Y2JB](https://github.com/Gezine/Y2JB) (YouTube / V8 JavaScript host).
 
 Confirmed working: jailbreak end-to-end + GPU-DMA debug menu + ELF
-loader (started automatically from the Y2JB sandbox) + persistent
+loader (delivered automatically by the Y2JB host) + persistent
 unpatcher delivery. Closing the YouTube host app after completion no
 longer kernel-panics the console.
 
@@ -21,9 +21,12 @@ The payload triggers a 32-bit `cr_ref` overflow in the PS5 kernel
 (via ~2³² `kqueueex` syscalls, ~50 minutes), uses the resulting
 use-after-free to build a kernel read/write primitive, escalates the
 host process to root, enables the Debug Settings menu via GPU DMA
-writes on the read-only kernel `.data` segment, then reads
-`elfldr_1320_v5.elf` from the Y2JB sandbox and spawns it as a new
-thread — exposing a remote ELF loader on TCP `:9021`.
+writes on the read-only kernel `.data` segment, then delivers an
+ELF loader inside the YouTube process. The binary and delivery
+mechanism depend on the installed Y2JB version (see
+[PS5 setup (Y2JB)](#ps5-setup-y2jb) below). Either way the loader
+ends up listening on TCP `:9021` for ELFs to run on the
+jailbroken PS5.
 
 ---
 
@@ -40,10 +43,17 @@ restored and the YouTube TV app launched, the PS5 has no listener
 for the payload and nothing will happen.
 
 **Y2JB 1.3 or newer.** The ELF loader is delivered differently
-depending on Y2JB version:
+depending on Y2JB version. The payload detects the framework
+version at runtime (from Y2JB's `version_string` global) and picks
+the matching path automatically — you don't need to configure
+anything.
 
-- **Y2JB 1.4+**: the payload reads `elfldr_1320_v5.elf` directly from
-  the Y2JB sandbox slot — no USB needed.
+- **Y2JB 1.5+**: the payload hands off to Y2JB's bundled `kexp`
+  shellcode (`load_aioshellcode`), which loads
+  `elfldr-ps5-0.23.elf` from inside the framework. No USB, nothing
+  to provide.
+- **Y2JB 1.4**: the payload reads `elfldr_1320_v5.elf` directly
+  from the Y2JB sandbox slot — no USB needed.
 - **Y2JB 1.3**: Y2JB 1.3 bundles an outdated `elfldr.elf` that does
   not work on the current kernels, so the payload reads
   `elfldr_1320.elf` from a USB stick plugged into the PS5
@@ -74,9 +84,10 @@ kernel (no leak, no stage 0).
 
 - `p2jb.js` — the jailbreak payload (this repo).
 - `elfldr_1320_v5.elf` — Gezine's ELF loader binary, included here
-  for Y2JB 1.3 users who need to provide it via USB. On Y2JB 1.4+ the
-  same file is already bundled inside the framework, so you can ignore
-  this one.
+  for Y2JB 1.3 users who need to provide it via USB. Y2JB 1.4 bundles
+  the same file inside the framework; Y2JB 1.5+ ships its own bundled
+  `elfldr-ps5-0.23.elf` instead. In either of those two cases you can
+  ignore this file.
 
 ---
 

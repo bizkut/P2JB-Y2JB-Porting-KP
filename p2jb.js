@@ -15,7 +15,7 @@
 
 (async function () {
     try {
-        const p2jb_version = "P2JB 2.5.1 (Y2JB port)";
+        const p2jb_version = "P2JB 2.6 (Y2JB port)";
 
         const PAGE_SIZE = 0x4000;
 
@@ -2091,7 +2091,11 @@
                 if (p_type !== 0x01n) continue;
 
                 const PROT_RW = PROT_READ | PROT_WRITE;
-                const PROT_RWX = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+                const PROT_X = (typeof PROT_EXEC !== "undefined")
+                    ? PROT_EXEC
+                    : (typeof PROT_EXECUTE !== "undefined" ? PROT_EXECUTE : 0x4n);
+                const PROT_RWX = PROT_READ | PROT_WRITE | PROT_X;
 
                 if ((p_flags & 0x1n) === 0x1n) {
                     executable_start = p_vaddr;
@@ -2165,6 +2169,15 @@
             return { thr_handle: read64(thr_handle_addr), payloadout };
         }
 
+        function get_y2jb_version() {
+            if (typeof version_string !== "string") return null;
+            const m = version_string.match(/Y2JB\s+(\d+)\.(\d+)/);
+            return m ? { major: +m[1], minor: +m[2], str: version_string } : null;
+        }
+        function y2jb_ge15(v) {
+            return v !== null && (v.major > 1 || (v.major === 1 && v.minor >= 5));
+        }
+
         function resolve_title_id() {
             if (typeof TITLE_ID === "string" && TITLE_ID.length > 0) return TITLE_ID;
             if (typeof get_title_id === "function") {
@@ -2176,7 +2189,7 @@
             return null;
         }
 
-        async function stage_load_elf(S) {
+        async function stage_load_elf_via_sandbox(S) {
             await ulog("stage_elfldr: entered (sandbox-slot elf_run handoff)");
             if (!S.data_base_ok) {
                 await ulog("stage_elfldr: kernel data_base not resolved - skipped");
@@ -2261,6 +2274,44 @@
                 await ulog("stage_elfldr: failed: " + e.message +
                     " (jailbreak unaffected)");
                 send_notification("Stage 7\nelfldr failed: " + e.message +
+                    "\n(jailbreak still complete)");
+            }
+        }
+
+        async function stage_load_elf_via_kexp(S) {
+            await ulog("stage_elfldr: entered (kexp / load_aioshellcode handoff)");
+            if (!S.data_base_ok) {
+                await ulog("stage_elfldr: kernel data_base not resolved - skipped");
+                send_notification("Stage 7\nelf loader skipped (no data_base)");
+                return;
+            }
+            try {
+                if (typeof load_aioshellcode !== "function") {
+                    await ulog("stage_elfldr: load_aioshellcode not in scope - " +
+                        "kexp delivery unavailable");
+                    send_notification("Stage 7\nload_aioshellcode missing\n" +
+                        "(jailbreak still complete)");
+                    return;
+                }
+
+                const allproc = S.data_base + S.OFF.DATA_BASE_ALLPROC;
+                const master_pipe = [BigInt(S.master_rfd), BigInt(S.master_wfd)];
+                const victim_pipe = [BigInt(S.victim_rfd), BigInt(S.victim_wfd)];
+                await ulog("stage_elfldr: handoff -> load_aioshellcode " +
+                    "(allproc=" + toHex(allproc) +
+                    " master=" + S.master_rfd + "," + S.master_wfd +
+                    " victim=" + S.victim_rfd + "," + S.victim_wfd + ")");
+
+                await load_aioshellcode(allproc, master_pipe, victim_pipe);
+
+                await ulog("stage_elfldr: load_aioshellcode returned - " +
+                    "elfldr should now be listening on :9021");
+                send_notification("Stage 7\nelfldr running - send your ELF to\n" +
+                    "<ps5-ip>:9021");
+            } catch (e) {
+                await ulog("stage_elfldr: kexp handoff failed: " + e.message +
+                    " (jailbreak unaffected)");
+                send_notification("Stage 7\nkexp failed: " + e.message +
                     "\n(jailbreak still complete)");
             }
         }
@@ -2357,7 +2408,15 @@
         await stage6(S);
         await stage7(S);
         await stage_debug_menu(S);
-        await stage_load_elf(S);
+
+        const yver = get_y2jb_version();
+        await ulog("stage_elfldr: detected " +
+            (yver ? yver.str : "Y2JB <unknown version_string>"));
+        if (y2jb_ge15(yver)) {
+            await stage_load_elf_via_kexp(S);
+        } else {
+            await stage_load_elf_via_sandbox(S);
+        }
 
         try {
             const B = S.proc_ucred;
